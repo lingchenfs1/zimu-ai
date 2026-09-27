@@ -38,7 +38,7 @@ final class AppleSpeechEngine: TranscriptionEngine {
 
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             let name = Locale.current.localizedString(forIdentifier: locale.identifier) ?? locale.identifier
-            await status("正在下载「\(name)」语音识别模型…")
+            status("正在下载「\(name)」语音识别模型…")
             try await request.downloadAndInstall()
         }
 
