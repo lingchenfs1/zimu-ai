@@ -141,7 +141,7 @@ zimu-ai/
 ### 阶段 7：性能、测试与发布
 - [ ] 7.1 延迟 / CPU / 内存测量与优化（需要在真机上测量）
 - [x] 7.2 Developer ID 签名 + 公证流程（CI 中配置 Secrets 后自动启用；未配置时本地签名）
-- [x] 7.3 DMG 打包（`scripts/package_dmg.sh`），CI 上传 DMG 产物，推送 `v*` 标签自动发布 Release；App 图标
+- [x] 7.3 DMG 打包（`scripts/package_dmg.sh`），CI 上传 DMG 产物，推送 `v*` 标签或手动触发 CI 并填写 `release_tag` 发布 Release；App 图标
 - [x] 7.4 README 使用说明（安装、权限、配置 API）
 
 **验收**：在一台干净的 macOS 26 机器上从 DMG 安装并完整跑通。
@@ -176,6 +176,7 @@ zimu-ai/
 | D5 | 2026-09-27 | XcodeGen + ZimuCore 本地包 + GitHub Actions macos-26 | 工程文件纯文本易维护；纯逻辑可测试；云端容器无法编译 macOS 代码 |
 | D6 | 2026-09-27 | App target 使用 Swift 5 语言模式（Swift 6.2 编译器），ZimuCore 保持 Swift 6 严格并发 | 云端容器无法本地编译，Swift 6 模式的并发报错只能靠 CI 反复试；且 Swift 6 模式会对音频回调等 C 回调插入运行时隔离断言，容易在音频线程崩溃。平台代码自行保证线程安全（音频类标注 nonisolated / 专用队列） |
 | D7 | 2026-09-27 | `TranscriptionEngine` 协议放在 App 层（依赖 AVAudioPCMBuffer），`TranscriptEvent` 等数据类型放 ZimuCore；`TranslationEngine` 协议放 ZimuCore | 识别引擎输入是 AVFoundation 类型，ZimuCore 保持不依赖 Apple 专有框架 |
+| D10 | 2026-09-27 | 发布也可以通过手动触发 CI（`workflow_dispatch` 填 `release_tag`）完成，由 CI 创建标签和 Release | Claude 云端会话只能推送到指定分支，推送标签会被拒绝（HTTP 403）；本地推送 `v*` 标签的方式仍然可用 |
 | D9 | 2026-09-27 | 识别引擎的 prepare / start / stop 统一在 MainActor 上执行，append 可在任意线程 | 避免启动与停止交错时在多个线程读写引擎状态 |
 | D8 | 2026-09-27 | 允许任意 HTTP 地址（`NSAllowsArbitraryLoads`），设置窗口由自己管理的 NSWindow 承载 | 支持局域网 / 本机 Ollama 等 http 服务；菜单栏应用打开 SwiftUI Settings 场景时窗口不易置前 |
 
@@ -191,3 +192,4 @@ zimu-ai/
 - 2026-09-27 | 2.1 / 3.2 / 3.4 / 4.2 / 6.5 | 按 SDK 核实与代码审查修复：Tap-only 聚合设备、输入 buffer 数不匹配、.fastResults、停止时保留最后结果、翻译队列代数、启停交错、致命识别错误、同语言翻译、开机启动错误提示、自动检测与 Apple 识别冲突 | CI 构建 | 待用户实测
 - 2026-09-27 | 7.2–7.4 | App 图标、DMG 打包脚本、CI 产出 DMG / Release、可选签名公证、README 使用说明 | CI 打包步骤 | 7.1 性能测量需真机；Developer ID 需用户提供证书
 - 2026-09-27 | 7.3 | 发布 v1.0.0：合并 PR lingchenfs1/zimu-ai#1 到 main，推送 `v1.0.0` 标签，由 CI 构建 DMG 并创建 GitHub Release（发布说明见 `docs/releases/v1.0.0.md`） | Release 工作流结果与 Release 页面 | 未签名公证；所有「待用户实测」项仍需真机确认
+- 2026-09-27 | 7.3 | PR 已合并（a91a794）；会话推送标签被拒（403），改为给 CI 增加手动发布入口（D10），合并后触发 `release_tag=v1.0.0` | Release 工作流结果与 Release 页面 | 同上
