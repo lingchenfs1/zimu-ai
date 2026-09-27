@@ -10,8 +10,17 @@ struct ZimuAIApp: App {
             MenuBarContentView()
                 .environment(AppModel.shared)
         } label: {
-            Image(systemName: "captions.bubble")
+            MenuBarLabel()
+                .environment(AppModel.shared)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+private struct MenuBarLabel: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Image(systemName: model.pipeline.state == .running ? "captions.bubble.fill" : "captions.bubble")
     }
 }

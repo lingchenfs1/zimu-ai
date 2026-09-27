@@ -30,6 +30,16 @@ final class SubtitleTimelineTests: XCTestCase {
         XCTAssertTrue(expired.isEmpty)
     }
 
+    func testIDsKeepIncreasingAfterReset() {
+        var timeline = SubtitleTimeline()
+        let first = timeline.commit(SubtitleSegment(text: "a", start: t0, end: t0), needsTranslation: true, at: t0)
+        timeline.reset()
+        let second = timeline.commit(SubtitleSegment(text: "b", start: t0, end: t0), needsTranslation: true, at: t0)
+        XCTAssertNotEqual(first, second)
+        timeline.updateTranslation(id: first, text: "late", isFinal: true, at: t0)
+        XCTAssertEqual(timeline.entry(id: second)?.translation, "")
+    }
+
     func testRecordsRelativeToSessionStart() {
         var timeline = SubtitleTimeline()
         timeline.startSession(at: t0)

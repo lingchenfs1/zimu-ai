@@ -144,11 +144,11 @@ public struct SubtitleTimeline: Sendable {
         liveUpdatedAt = nil
     }
 
+    /// 清空字幕。id 不会重新从 1 开始，避免上一轮迟到的译文写到新字幕上。
     public mutating func reset() {
         entries.removeAll()
         liveText = ""
         liveUpdatedAt = nil
         sessionStart = nil
-        nextID = 1
     }
 }

@@ -4,10 +4,18 @@ import ZimuCore
 struct SettingsView: View {
     var body: some View {
         TabView {
+            GeneralSettingsView()
+                .tabItem { Label("通用", systemImage: "gearshape") }
+            TranscriptionSettingsView()
+                .tabItem { Label("识别", systemImage: "waveform") }
+            TranslationSettingsView()
+                .tabItem { Label("翻译", systemImage: "character.bubble") }
             AppearanceSettingsView()
                 .tabItem { Label("外观", systemImage: "textformat.size") }
+            ShortcutsSettingsView()
+                .tabItem { Label("快捷键", systemImage: "keyboard") }
         }
-        .frame(minWidth: 560, minHeight: 420)
+        .frame(minWidth: 580, minHeight: 460)
     }
 }
 

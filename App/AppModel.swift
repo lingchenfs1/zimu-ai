@@ -9,17 +9,25 @@ final class AppModel {
     static let shared = AppModel()
 
     let settingsStore: SettingsStore
+    let apiKeys: APIKeyStore
     let subtitles: SubtitleStore
     let demo: DemoSubtitleFeeder
+    let pipeline: PipelineController
     let overlay: OverlayController
     let settingsWindow: SettingsWindowController
 
+    private(set) var isRecordingTestAudio = false
+    private(set) var failedHotKeys: [String] = []
+
     private init() {
         let settingsStore = SettingsStore()
+        let apiKeys = APIKeyStore()
         let subtitles = SubtitleStore()
         self.settingsStore = settingsStore
+        self.apiKeys = apiKeys
         self.subtitles = subtitles
         self.demo = DemoSubtitleFeeder()
+        self.pipeline = PipelineController(settingsStore: settingsStore, apiKeys: apiKeys, subtitles: subtitles)
         self.overlay = OverlayController(settingsStore: settingsStore, subtitles: subtitles)
         self.settingsWindow = SettingsWindowController()
         subtitles.settingsProvider = { [unowned settingsStore] in settingsStore.settings }
@@ -32,9 +40,28 @@ final class AppModel {
 
     func applicationDidFinishLaunching() {
         overlay.setUp()
+        ChangeObserver.observe({ [settingsStore] in settingsStore.settings.hotkeysEnabled }) { [weak self] enabled in
+            self?.configureHotKeys(enabled: enabled)
+        }
+    }
+
+    func applicationWillTerminate() {
+        pipeline.stop()
+        HotKeyCenter.shared.unregisterAll()
+    }
+
+    // MARK: 操作
+
+    func toggleSubtitles() {
+        if demo.isRunning { demo.stop() }
+        pipeline.toggle()
+        if pipeline.isActive {
+            settingsStore.settings.overlayVisible = true
+        }
     }
 
     func toggleDemo() {
+        if pipeline.isActive { pipeline.stop() }
         demo.toggle(store: subtitles)
         if demo.isRunning {
             settingsStore.settings.overlayVisible = true
@@ -43,5 +70,70 @@ final class AppModel {
 
     func openSettings() {
         settingsWindow.show(model: self)
+    }
+
+    func exportSubtitles() {
+        SubtitleExporter.exportSRT(records: subtitles.timeline.records(), mode: settingsStore.settings.displayMode)
+    }
+
+    /// 调试：录制 10 秒系统音频为 WAV，保存到「下载」文件夹
+    func recordTestAudio() {
+        guard !isRecordingTestAudio else { return }
+        isRecordingTestAudio = true
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let url = folder.appendingPathComponent("字幕AI-系统音频测试-\(formatter.string(from: Date())).wav")
+
+        let capture = SystemAudioCapture()
+        do {
+            try capture.start(
+                bundleID: settingsStore.settings.captureBundleID,
+                outputFormat: nil,
+                onBuffer: { _ in },
+                onLevel: { _ in }
+            )
+        } catch {
+            isRecordingTestAudio = false
+            showAlert(title: "无法开始录制", message: error.localizedDescription)
+            return
+        }
+        capture.record(to: url, duration: 10) { [weak self] savedURL in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    capture.stop()
+                    self?.isRecordingTestAudio = false
+                    if let savedURL {
+                        NSWorkspace.shared.activateFileViewerSelecting([savedURL])
+                    } else {
+                        self?.showAlert(title: "录制失败", message: "没有录到系统音频，请检查「录制系统音频」权限。")
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: 快捷键
+
+    private func configureHotKeys(enabled: Bool) {
+        let center = HotKeyCenter.shared
+        center.unregisterAll()
+        guard enabled else {
+            failedHotKeys = []
+            return
+        }
+        center.register(HotKeyCenter.startStop) { [weak self] in self?.toggleSubtitles() }
+        center.register(HotKeyCenter.lockToggle) { [weak self] in self?.overlay.toggleLocked() }
+        center.register(HotKeyCenter.visibilityToggle) { [weak self] in self?.overlay.toggleVisible() }
+        failedHotKeys = center.failedHotKeys.map(\.display)
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        NSApp.activate()
+        alert.runModal()
     }
 }
