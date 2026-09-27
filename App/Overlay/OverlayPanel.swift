@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// 悬浮字幕窗：无边框、不抢焦点、所有桌面可见、可以显示在全屏视频之上
 final class OverlayPanel: NSPanel {
@@ -26,4 +27,9 @@ final class OverlayPanel: NSPanel {
     // 不成为 key window，避免抢走视频播放器的键盘焦点
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+/// 窗口不是 key window 时也直接响应第一次点击 / 拖动
+final class OverlayHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

@@ -27,7 +27,7 @@ final class OverlayController {
             subtitles: subtitles,
             controller: self
         )
-        let hosting = NSHostingView(rootView: root)
+        let hosting = OverlayHostingView(rootView: root)
         hosting.sizingOptions = []
         panel.contentView = hosting
         self.panel = panel

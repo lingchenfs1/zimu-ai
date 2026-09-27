@@ -29,7 +29,7 @@ final class SystemAudioCapture {
     /// 开始捕获
     /// - Parameters:
     ///   - bundleID: 只捕获该应用（及其子进程）；nil 表示全部系统音频（排除本应用）
-    ///   - outputFormat: 回调中 buffer 的格式（识别引擎需要的格式）；nil 表示不转换
+    ///   - outputFormat: 回调中 buffer 的格式（识别引擎需要的格式）；nil 表示不回调音频（只测电平 / 录音）
     func start(
         bundleID: String?,
         outputFormat: AVAudioFormat?,
@@ -199,12 +199,9 @@ final class SystemAudioCapture {
             completion?(url)
         }
 
-        if let converter {
-            if let converted = converter.convert(buffer) {
-                onBuffer?(converted)
-            }
-        } else if let copy = AudioFormatConverter(outputFormat: format).convert(buffer) {
-            onBuffer?(copy)
+        // 没有指定输出格式时（例如只录音测试）不回调音频
+        if let converter, let converted = converter.convert(buffer) {
+            onBuffer?(converted)
         }
     }
 }

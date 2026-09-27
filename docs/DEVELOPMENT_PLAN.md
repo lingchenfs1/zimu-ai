@@ -84,65 +84,65 @@ zimu-ai/
 **验收**：CI 绿；用户在 Mac 上 `xcodegen generate` 后运行，菜单栏出现图标，可退出。
 
 ### 阶段 1：悬浮字幕窗（先用演示字幕驱动）
-- [ ] 1.1 `OverlayPanel`：置顶、不抢焦点、所有桌面可见、全屏视频之上可见
-- [ ] 1.2 `SubtitleView`：原文 / 译文两行，单语 / 双语显示切换
-- [ ] 1.3 外观设置：背景透明度、文字透明度、字号、颜色、圆角
-- [ ] 1.4 锁定 = 鼠标穿透（`ignoresMouseEvents`）；解锁 = 可拖动、可缩放
-- [ ] 1.5 窗口位置 / 大小记忆
-- [ ] 1.6 「演示字幕」模式：定时滚动假字幕，便于调外观
+- [ ] 1.1 `OverlayPanel`：置顶、不抢焦点、所有桌面可见、全屏视频之上可见（待用户实测）
+- [ ] 1.2 `SubtitleOverlayView`：原文 / 译文两行，单语 / 双语显示切换（待用户实测）
+- [ ] 1.3 外观设置：背景透明度、文字透明度、字号、颜色、圆角（待用户实测）
+- [ ] 1.4 锁定 = 鼠标穿透（`ignoresMouseEvents`）；解锁 = 可拖动、可缩放（待用户实测）
+- [ ] 1.5 窗口位置 / 大小记忆（待用户实测）
+- [ ] 1.6 「演示字幕」模式：定时滚动假字幕，便于调外观（待用户实测）
 
 **验收**：全屏播放视频时字幕窗可见；透明度等外观设置实时生效；锁定后点击穿透到下层窗口。
 
 ### 阶段 2：系统音频捕获
-- [ ] 2.1 `SystemAudioTap`：全局 Tap（排除本应用进程）
-- [ ] 2.2 指定 App 捕获（列出正在发声的进程供选择）
-- [ ] 2.3 权限申请与引导（首次使用、被拒绝后的提示与跳转系统设置）
-- [ ] 2.4 `AudioFormatConverter`：转换为识别引擎需要的格式
-- [ ] 2.5 菜单栏 / 设置里显示实时电平
-- [ ] 2.6 调试功能：录制 N 秒为 WAV 文件
+- [ ] 2.1 `SystemAudioCapture`：全局 Tap（排除本应用进程）（待用户实测）
+- [ ] 2.2 指定 App 捕获（列出正在发声的进程供选择）（待用户实测）
+- [ ] 2.3 权限申请与引导（首次使用、被拒绝后的提示与跳转系统设置）（待用户实测）
+- [ ] 2.4 `AudioFormatConverter`：转换为识别引擎需要的格式（待用户实测）
+- [ ] 2.5 菜单栏 / 设置里显示实时电平（待用户实测）
+- [ ] 2.6 调试功能：录制 10 秒为 WAV 文件（设置 › 通用）（待用户实测）
 
 **验收**：播放视频时电平跳动；导出的 WAV 能正常播放且无回环。
 
 ### 阶段 3：本地语音识别（Apple SpeechAnalyzer）
-- [ ] 3.1 `TranscriptionEngine` 协议（ZimuCore）：输入音频 buffer，输出草稿 / 定稿片段流
-- [ ] 3.2 `AppleSpeechEngine`：源语言选择、`AssetInventory` 模型下载、草稿 / 定稿结果
-- [ ] 3.3 `SubtitleSegmenter`（ZimuCore）：断句、最长时长 / 字数限制 + 单元测试
-- [ ] 3.4 `PipelineController` 串起 捕获 → 识别 → 字幕窗，原文实时上屏
+- [x] 3.1 `TranscriptionEngine` 协议（App 层，见 D7）+ `TranscriptEvent`（ZimuCore）：输入音频 buffer，输出草稿 / 定稿片段
+- [ ] 3.2 `AppleSpeechEngine`：源语言选择、`AssetInventory` 模型下载、草稿 / 定稿结果（待用户实测）
+- [x] 3.3 `SubtitleSegmenter`（ZimuCore）：断句、最长时长 / 字数限制 + 单元测试
+- [ ] 3.4 `PipelineController` 串起 捕获 → 识别 → 字幕窗，原文实时上屏（待用户实测）
 
 **验收**：播放英文视频，原文字幕延迟约 ≤1.5s，断句自然。
 
 ### 阶段 4：翻译
-- [ ] 4.1 `TranslationEngine` 协议（ZimuCore）
-- [ ] 4.2 `AppleTranslationEngine`：`TranslationSession(installedSource:target:)` + 语言包可用性检测与下载引导
-- [ ] 4.3 `OpenAICompatibleTranslator`（ZimuCore）：Base URL / Key / Model 配置，SSE 流式解析，带上下文的翻译 prompt + 单元测试
-- [ ] 4.4 设置页「测试连接」按钮
-- [ ] 4.5 按 segment id 对齐译文；乱序、超时、失败时降级为只显示原文
-- [ ] 4.6 目标语言选择
+- [x] 4.1 `TranslationEngine` 协议（ZimuCore）
+- [ ] 4.2 `AppleTranslationEngine`：`TranslationSession(installedSource:target:)` + 语言包可用性检测与下载引导（待用户实测）
+- [x] 4.3 `OpenAICompatibleTranslator`（ZimuCore）：Base URL / Key / Model 配置，SSE 流式解析，带上下文的翻译 prompt + 单元测试
+- [ ] 4.4 设置页「测试翻译 / 测试连接」按钮（待用户实测）
+- [x] 4.5 按 segment id 对齐译文；积压时丢弃旧句、失败时降级为只显示原文（SubtitleTimeline 单元测试覆盖）
+- [x] 4.6 目标语言选择
 
 **验收**：两种翻译引擎都能出译文；断网时 Apple 本地引擎仍然可用。
 
 ### 阶段 5：云端语音识别
-- [ ] 5.1 能量 VAD 分段 + WAV 编码（ZimuCore）+ 单元测试
-- [ ] 5.2 `OpenAICompatibleSTT`：调用 `/v1/audio/transcriptions`
-- [ ] 5.3 设置中切换本地 / 云端识别引擎
+- [x] 5.1 能量 VAD 分段 + WAV 编码（ZimuCore）+ 单元测试
+- [ ] 5.2 `OpenAICompatibleSTTEngine`：调用 `/v1/audio/transcriptions`（待用户实测）
+- [ ] 5.3 设置中切换本地 / 云端识别引擎（待用户实测）
 
 **验收**：切换到云端识别后字幕正常出现。
 
 ### 阶段 6：设置与体验打磨
-- [ ] 6.1 完整设置窗口：通用 / 识别 / 翻译 / 外观 / 快捷键
-- [ ] 6.2 `KeychainStore`：API Key 只存 Keychain
-- [ ] 6.3 全局快捷键：开始 / 停止、锁定 / 解锁、显示 / 隐藏字幕
-- [ ] 6.4 菜单栏状态指示 + 错误提示
-- [ ] 6.5 开机启动（`SMAppService`）
-- [ ] 6.6 （可选）字幕历史，导出 SRT
+- [ ] 6.1 完整设置窗口：通用 / 识别 / 翻译 / 外观 / 快捷键（待用户实测）
+- [ ] 6.2 `APIKeyStore` / `Keychain`：API Key 只存钥匙串（待用户实测）
+- [ ] 6.3 全局快捷键 ⌃⌥S / ⌃⌥L / ⌃⌥H（Carbon，无需辅助功能权限）（待用户实测）
+- [ ] 6.4 菜单栏状态指示、电平 + 错误提示（待用户实测）
+- [ ] 6.5 开机启动（`SMAppService`）（待用户实测）
+- [ ] 6.6 字幕历史，导出 SRT（格式化有单元测试）（待用户实测）
 
 **验收**：全部设置可用且重启后保留；快捷键在任意 App 前台时可用。
 
 ### 阶段 7：性能、测试与发布
-- [ ] 7.1 延迟 / CPU / 内存测量与优化
-- [ ] 7.2 Developer ID 签名 + 公证（notarization）
-- [ ] 7.3 DMG 打包，CI 自动发布 Release
-- [ ] 7.4 README 使用说明（安装、权限、配置 API）
+- [ ] 7.1 延迟 / CPU / 内存测量与优化（需要在真机上测量）
+- [x] 7.2 Developer ID 签名 + 公证流程（CI 中配置 Secrets 后自动启用；未配置时本地签名）
+- [x] 7.3 DMG 打包（`scripts/package_dmg.sh`），CI 上传 DMG 产物，推送 `v*` 标签自动发布 Release；App 图标
+- [x] 7.4 README 使用说明（安装、权限、配置 API）
 
 **验收**：在一台干净的 macOS 26 机器上从 DMG 安装并完整跑通。
 
@@ -154,6 +154,10 @@ zimu-ai/
 - Process Tap 必须排除本应用自身进程，避免回环。
 - 悬浮窗要盖住全屏视频，需要 `.fullScreenAuxiliary` + 足够高的 window level，并使用 `.nonactivatingPanel` 避免抢焦点。
 - Claude 的云端开发容器是 Linux，无法编译 macOS 代码：平台无关逻辑尽量放进 ZimuCore，编译以 GitHub Actions 为准。
+- 悬浮窗 `canBecomeKey = false`（不抢键盘焦点），因此内容视图要重写 `acceptsFirstMouse` 才能直接响应点击和拖动。
+- 系统音频权限被拒绝时，Process Tap 不会报错，只会收到静音数据 → 通过电平表和「录制 10 秒测试」来排查。
+- 同一次运行中字幕 id 单调递增（`SubtitleTimeline.reset()` 不重置 id），避免上一轮迟到的译文写到新字幕上。
+- 浏览器的声音通常来自子进程（如 `com.google.Chrome.helper`、Safari 的 `com.apple.WebKit.GPU`），指定应用捕获时按 bundle ID 前缀匹配；Safari 请在列表中选择 WebKit 进程或直接用「全部系统音频」。
 
 ## 6. 决策记录
 
@@ -175,3 +179,6 @@ zimu-ai/
 - 2026-09-27 | 0.1 | 制定开发计划，建立 `CLAUDE.md` + `docs/DEVELOPMENT_PLAN.md` 长期记忆 | 文档审阅 | 无
 - 2026-09-27 | 0.2–0.5 | .gitignore、project.yml、Info.plist / entitlements、菜单栏空壳、ZimuCore 包、CI workflow | CI（macos-26，Xcode 26）生成工程 + 测试 + 构建全部通过 | 菜单栏图标需用户在 Mac 上实测
 - 2026-09-27 | 3.3 / 4.3 / 5.1（提前） | ZimuCore 纯逻辑：SubtitleSegmenter、SubtitleTimeline、OpenAI 兼容翻译 / 识别客户端、SSE 解析、EnergyVAD、WAV、SRT、设置模型 + 单元测试 | CI `swift test` | App 层接入在对应阶段完成
+- 2026-09-27 | 1.1–1.6 | 悬浮字幕窗、外观设置、锁定穿透、拖动缩放、位置记忆、演示字幕、菜单栏面板 | CI 构建通过 | 待用户实测（全屏视频之上是否可见、点击穿透）
+- 2026-09-27 | 2.x / 3.x / 4.x / 5.x / 6.x | 系统音频捕获（Process Tap）、Apple 识别 / 翻译引擎、云端识别、流水线、完整设置、钥匙串、快捷键、开机启动、SRT 导出 | CI 构建通过（无警告），ZimuCore 46 个单元测试通过 | 待用户实测：权限弹窗、识别效果与延迟、翻译语言包下载
+- 2026-09-27 | 7.2–7.4 | App 图标、DMG 打包脚本、CI 产出 DMG / Release、可选签名公证、README 使用说明 | CI 打包步骤 | 7.1 性能测量需真机；Developer ID 需用户提供证书
