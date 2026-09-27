@@ -71,9 +71,10 @@ final class SystemAudioCapture {
                 throw AudioCaptureError.invalidFormat
             }
             tapFormat = format
+            NSLog("ZimuAI: tap format \(format)")
 
             // 3. 创建包含 Tap 的私有聚合设备（以默认输出设备为时钟）
-            let outputDevice = try CoreAudioUtils.defaultSystemOutputDevice()
+            let outputDevice = try CoreAudioUtils.defaultOutputDevice()
             let outputUID = try CoreAudioUtils.readString(outputDevice, kAudioDevicePropertyDeviceUID)
             let aggregateDescription: [String: Any] = [
                 kAudioAggregateDeviceNameKey: "ZimuAI Aggregate",
@@ -181,9 +182,7 @@ final class SystemAudioCapture {
 
     // 在 queue 上执行
     private func handleInput(_ inputData: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inputData, deallocator: nil),
-              buffer.frameLength > 0
-        else { return }
+        guard let buffer = makeBuffer(from: inputData, format: format), buffer.frameLength > 0 else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastLevelTime >= 0.06 {
@@ -203,5 +202,35 @@ final class SystemAudioCapture {
         if let converter, let converted = converter.convert(buffer) {
             onBuffer?(converted)
         }
+    }
+
+    private var loggedBufferMismatch = false
+
+    /// 把 IOProc 的输入包装成 PCM buffer。
+    /// 如果默认输出设备本身带输入流（例如带麦克风的耳机），聚合设备的输入里会多出设备自己的流，
+    /// 这时 bufferListNoCopy 会失败；Tap 的流排在最后，取最后几个 buffer 复制出来。
+    private func makeBuffer(from inputData: UnsafePointer<AudioBufferList>, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        let expected = format.isInterleaved ? 1 : Int(format.channelCount)
+        if list.count == expected {
+            return AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inputData, deallocator: nil)
+        }
+        if !loggedBufferMismatch {
+            loggedBufferMismatch = true
+            NSLog("ZimuAI: aggregate input has \(list.count) buffers, tap format expects \(expected); using the last ones")
+        }
+        guard list.count > expected else { return nil }
+        let tapBuffers = Array(list.suffix(expected))
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        guard bytesPerFrame > 0, let first = tapBuffers.first else { return nil }
+        let frames = AVAudioFrameCount(Int(first.mDataByteSize) / bytesPerFrame)
+        guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
+        buffer.frameLength = frames
+        let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        for (index, source) in tapBuffers.enumerated() where index < destination.count {
+            guard let src = source.mData, let dst = destination[index].mData else { continue }
+            memcpy(dst, src, Int(min(source.mDataByteSize, destination[index].mDataByteSize)))
+        }
+        return buffer
     }
 }

@@ -22,6 +22,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 
     func windowWillClose(_ notification: Notification) {

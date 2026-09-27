@@ -28,7 +28,7 @@ final class AppleSpeechEngine: TranscriptionEngine {
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
+            reportingOptions: [.volatileResults, .fastResults],
             attributeOptions: []
         )
 
@@ -71,7 +71,10 @@ final class AppleSpeechEngine: TranscriptionEngine {
             }
         }
 
-        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let analyzer = SpeechAnalyzer(
+            modules: [transcriber],
+            options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .whileInUse)
+        )
         self.analyzer = analyzer
         try await analyzer.start(inputSequence: inputSequence)
     }
@@ -89,7 +92,11 @@ final class AppleSpeechEngine: TranscriptionEngine {
         }
         continuation?.finish()
         if let analyzer {
-            try? await analyzer.finalizeAndFinishThroughEndOfInput()
+            do {
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
+            } catch {
+                await analyzer.cancelAndFinishNow()
+            }
         }
         // 等结果流结束（最多 3 秒）
         if let task = resultsTask {

@@ -82,12 +82,15 @@ enum CoreAudioUtils {
         return objectID
     }
 
-    static func defaultSystemOutputDevice() throws -> AudioDeviceID {
-        let id: AudioDeviceID = try read(systemObject, kAudioHardwarePropertyDefaultSystemOutputDevice, default: AudioDeviceID(kAudioObjectUnknown))
-        guard id != AudioDeviceID(kAudioObjectUnknown) else {
-            throw AudioCaptureError.coreAudio("读取默认输出设备", OSStatus(kAudioHardwareBadDeviceError))
+    /// 聚合设备的时钟设备：优先使用默认输出设备（媒体播放的设备），其次是系统提示音设备
+    static func defaultOutputDevice() throws -> AudioDeviceID {
+        let unknown = AudioDeviceID(kAudioObjectUnknown)
+        for selector in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice] {
+            if let id: AudioDeviceID = try? read(systemObject, selector, default: unknown), id != unknown {
+                return id
+            }
         }
-        return id
+        throw AudioCaptureError.coreAudio("读取默认输出设备", OSStatus(kAudioHardwareBadDeviceError))
     }
 
     static func fourCC(_ value: UInt32) -> String {
