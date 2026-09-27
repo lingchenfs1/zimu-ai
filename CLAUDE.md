@@ -19,7 +19,7 @@ macOS 26+ 菜单栏应用：捕获 Mac 本地播放的音频 → 语音识别 �
 
 ## 代码约定
 
-- Swift 6 严格并发；UI 相关类型标注 `@MainActor`，音频 / 网络处理放在 actor 或后台任务中。
+- ZimuCore 使用 Swift 6 严格并发；App target 使用 Swift 5 语言模式（决策 D6）。UI 相关类型标注 `@MainActor`，音频回调在专用队列上处理，不要在音频线程访问 MainActor 状态。
 - 依赖 Apple 平台框架的代码放 `App/`，可测试的纯逻辑放 `Packages/ZimuCore`。
 - `.xcodeproj` 由 XcodeGen 从 `project.yml` 生成，不提交到仓库。
 - API Key 只存 Keychain，绝不写进代码、日志或提交记录。

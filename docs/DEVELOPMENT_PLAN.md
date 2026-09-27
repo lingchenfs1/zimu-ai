@@ -76,10 +76,10 @@ zimu-ai/
 
 ### 阶段 0：工程骨架与长期记忆
 - [x] 0.1 制定开发计划，建立 `CLAUDE.md` + `docs/DEVELOPMENT_PLAN.md` 长期记忆
-- [ ] 0.2 `.gitignore`（忽略 `*.xcodeproj`、`DerivedData`、`.build` 等）
-- [ ] 0.3 `project.yml` + 菜单栏空壳 App（`LSUIElement`、Info.plist、entitlements）
-- [ ] 0.4 `Packages/ZimuCore` 包 + 一个示例单元测试
-- [ ] 0.5 GitHub Actions workflow（`macos-26`：xcodegen → build → test）
+- [x] 0.2 `.gitignore`（忽略 `*.xcodeproj`、`DerivedData`、`.build` 等）
+- [x] 0.3 `project.yml` + 菜单栏空壳 App（`LSUIElement`、Info.plist、entitlements）
+- [x] 0.4 `Packages/ZimuCore` 包 + 一个示例单元测试
+- [x] 0.5 GitHub Actions workflow（`macos-26`：xcodegen → build → test）
 
 **验收**：CI 绿；用户在 Mac 上 `xcodegen generate` 后运行，菜单栏出现图标，可退出。
 
@@ -164,9 +164,14 @@ zimu-ai/
 | D3 | 2026-09-27 | 翻译同时支持 Apple 本地 Translation + OpenAI 兼容服务 | 用户要求；本地离线可用，大模型翻译质量高 |
 | D4 | 2026-09-27 | 系统音频用 Core Audio Process Tap | 只需"系统录音"权限，可按 App 捕获，不需要屏幕录制权限 |
 | D5 | 2026-09-27 | XcodeGen + ZimuCore 本地包 + GitHub Actions macos-26 | 工程文件纯文本易维护；纯逻辑可测试；云端容器无法编译 macOS 代码 |
+| D6 | 2026-09-27 | App target 使用 Swift 5 语言模式（Swift 6.2 编译器），ZimuCore 保持 Swift 6 严格并发 | 云端容器无法本地编译，Swift 6 模式的并发报错只能靠 CI 反复试；且 Swift 6 模式会对音频回调等 C 回调插入运行时隔离断言，容易在音频线程崩溃。平台代码自行保证线程安全（音频类标注 nonisolated / 专用队列） |
+| D7 | 2026-09-27 | `TranscriptionEngine` 协议放在 App 层（依赖 AVAudioPCMBuffer），`TranscriptEvent` 等数据类型放 ZimuCore；`TranslationEngine` 协议放 ZimuCore | 识别引擎输入是 AVFoundation 类型，ZimuCore 保持不依赖 Apple 专有框架 |
+| D8 | 2026-09-27 | 允许任意 HTTP 地址（`NSAllowsArbitraryLoads`），设置窗口由自己管理的 NSWindow 承载 | 支持局域网 / 本机 Ollama 等 http 服务；菜单栏应用打开 SwiftUI Settings 场景时窗口不易置前 |
 
 ## 7. 进度日志
 
 > 格式：`日期 | 任务编号 | 做了什么 | 如何验证 | 遗留问题`
 
 - 2026-09-27 | 0.1 | 制定开发计划，建立 `CLAUDE.md` + `docs/DEVELOPMENT_PLAN.md` 长期记忆 | 文档审阅 | 无
+- 2026-09-27 | 0.2–0.5 | .gitignore、project.yml、Info.plist / entitlements、菜单栏空壳、ZimuCore 包、CI workflow | CI（macos-26，Xcode 26）生成工程 + 测试 + 构建全部通过 | 菜单栏图标需用户在 Mac 上实测
+- 2026-09-27 | 3.3 / 4.3 / 5.1（提前） | ZimuCore 纯逻辑：SubtitleSegmenter、SubtitleTimeline、OpenAI 兼容翻译 / 识别客户端、SSE 解析、EnergyVAD、WAV、SRT、设置模型 + 单元测试 | CI `swift test` | App 层接入在对应阶段完成
