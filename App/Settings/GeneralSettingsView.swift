@@ -50,7 +50,7 @@ struct GeneralSettingsView: View {
                         Text(language.name).tag(language.code)
                     }
                 }
-                Text("Apple 本地识别需要手动选择原声语言；云端识别可以自动检测。")
+                Text("Apple 本地识别需要手动选择原声语言；云端识别可以自动检测。识别和翻译相关的设置在下次开始字幕时生效。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

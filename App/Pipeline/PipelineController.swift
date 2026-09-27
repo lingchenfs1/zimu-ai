@@ -119,7 +119,11 @@ final class PipelineController {
                 self.warning = "识别出错：\(error.localizedDescription)"
             }
         )
-        guard runID == currentRun else { return }
+        guard runID == currentRun else {
+            // 启动过程中用户点了停止：teardown 可能早于 engine.start 完成，这里补一次停止
+            await engine.stop()
+            return
+        }
 
         state = .preparing("正在开始捕获系统音频…")
         let capture = SystemAudioCapture()
