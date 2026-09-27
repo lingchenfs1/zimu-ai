@@ -28,6 +28,7 @@ final class OpenAICompatibleSTTEngine: TranscriptionEngine {
         self.vad = EnergyVAD(configuration: configuration)
     }
 
+    @MainActor
     func prepare(status: @escaping @MainActor (String) -> Void) async throws -> AVAudioFormat {
         _ = try OpenAIEndpoint.url(base: client.config.baseURL, path: OpenAIEndpoint.transcriptionsPath)
         if client.config.model.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -36,9 +37,10 @@ final class OpenAICompatibleSTTEngine: TranscriptionEngine {
         return format
     }
 
+    @MainActor
     func start(
         onEvent: @escaping @MainActor (TranscriptEvent) -> Void,
-        onError: @escaping @MainActor (Error) -> Void
+        onError: @escaping @MainActor (_ error: Error, _ isFatal: Bool) -> Void
     ) async throws {
         let (segments, continuation) = AsyncStream<[Float]>.makeStream(bufferingPolicy: .bufferingNewest(4))
         queue.sync {
@@ -66,7 +68,7 @@ final class OpenAICompatibleSTTEngine: TranscriptionEngine {
                     break
                 } catch {
                     await onEvent(.partial(""))
-                    await onError(error)
+                    await onError(error, false)
                 }
             }
         }
@@ -83,6 +85,7 @@ final class OpenAICompatibleSTTEngine: TranscriptionEngine {
         }
     }
 
+    @MainActor
     func stop() async {
         queue.sync {
             if isRunning, let last = vad.flush() {

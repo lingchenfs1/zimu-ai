@@ -12,6 +12,10 @@ final class SettingsStore {
 
     var settings: AppSettings {
         didSet {
+            // Apple 本地识别不能自动检测语言：从云端识别切回时恢复为具体语言
+            if settings.transcriptionEngine == .apple && settings.sourceLanguage == "auto" {
+                settings.sourceLanguage = AppSettings().sourceLanguage
+            }
             if settings != oldValue { save() }
         }
     }

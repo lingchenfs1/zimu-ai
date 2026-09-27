@@ -10,6 +10,23 @@ struct GeneralSettingsView: View {
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchError: String?
 
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin },
+            set: { enabled in
+                do {
+                    try LaunchAtLogin.setEnabled(enabled)
+                    launchError = LaunchAtLogin.requiresApproval
+                        ? "需要在 系统设置 › 通用 › 登录项 中允许字幕AI"
+                        : nil
+                } catch {
+                    launchError = error.localizedDescription
+                }
+                launchAtLogin = LaunchAtLogin.isEnabled
+            }
+        )
+    }
+
     var body: some View {
         @Bindable var store = model.settingsStore
 
@@ -70,16 +87,7 @@ struct GeneralSettingsView: View {
             }
 
             Section("启动") {
-                Toggle("登录时自动启动", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, enabled in
-                        do {
-                            try LaunchAtLogin.setEnabled(enabled)
-                            launchError = nil
-                        } catch {
-                            launchError = error.localizedDescription
-                            launchAtLogin = LaunchAtLogin.isEnabled
-                        }
-                    }
+                Toggle("登录时自动启动", isOn: launchAtLoginBinding)
                 if let launchError {
                     Text(launchError).font(.caption).foregroundStyle(.red)
                 }

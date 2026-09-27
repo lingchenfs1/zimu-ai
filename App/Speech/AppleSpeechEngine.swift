@@ -16,7 +16,11 @@ final class AppleSpeechEngine: TranscriptionEngine {
         self.localeIdentifier = localeIdentifier
     }
 
+    @MainActor
     func prepare(status: @escaping @MainActor (String) -> Void) async throws -> AVAudioFormat {
+        guard localeIdentifier != "auto" else {
+            throw TranscriptionError.autoDetectNotSupported
+        }
         guard SpeechTranscriber.isAvailable else {
             throw TranscriptionError.unavailable
         }
@@ -45,16 +49,17 @@ final class AppleSpeechEngine: TranscriptionEngine {
         return format
     }
 
+    @MainActor
     func start(
         onEvent: @escaping @MainActor (TranscriptEvent) -> Void,
-        onError: @escaping @MainActor (Error) -> Void
+        onError: @escaping @MainActor (_ error: Error, _ isFatal: Bool) -> Void
     ) async throws {
         guard let transcriber else { throw TranscriptionError.noAudioFormat }
 
         let (inputSequence, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         lock.withLock { inputContinuation = continuation }
 
-        resultsTask = Task.detached(priority: .userInitiated) {
+        resultsTask = Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
@@ -67,7 +72,9 @@ final class AppleSpeechEngine: TranscriptionEngine {
             } catch is CancellationError {
                 // 正常停止
             } catch {
-                await onError(error)
+                // 结果流出错后分析会话已结束，不再读取输入：关闭输入流，避免音频无限堆积
+                self?.finishInput()
+                await onError(error, true)
             }
         }
 
@@ -84,13 +91,18 @@ final class AppleSpeechEngine: TranscriptionEngine {
         continuation?.yield(AnalyzerInput(buffer: buffer))
     }
 
-    func stop() async {
+    private func finishInput() {
         let continuation = lock.withLock { () -> AsyncStream<AnalyzerInput>.Continuation? in
             let current = inputContinuation
             inputContinuation = nil
             return current
         }
         continuation?.finish()
+    }
+
+    @MainActor
+    func stop() async {
+        finishInput()
         if let analyzer {
             do {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()

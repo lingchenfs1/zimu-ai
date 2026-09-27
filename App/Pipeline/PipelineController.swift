@@ -40,12 +40,17 @@ final class PipelineController {
     @ObservationIgnored private var partialText = ""
     @ObservationIgnored private var flushTask: Task<Void, Never>?
     @ObservationIgnored private var startTask: Task<Void, Never>?
+    /// 每次开始 / 停止都会递增，用于中止过期的启动流程
     @ObservationIgnored private var runID = 0
+    /// 当前接受识别事件的运行编号。停止时要等引擎把剩余结果输出完，所以与 runID 分开
+    @ObservationIgnored private var eventRunID = -1
 
     // 翻译队列
     @ObservationIgnored private var pendingTranslations: [(id: Int, text: String)] = []
     @ObservationIgnored private var translationTask: Task<Void, Never>?
     @ObservationIgnored private var isTranslating = false
+    /// 翻译队列代数：取消后旧任务的收尾不会影响新队列
+    @ObservationIgnored private var translationGeneration = 0
     @ObservationIgnored private var contextLines = 3
     /// 积压超过这个数量时丢弃较早的待翻译句子，保证字幕实时
     private let maxPendingTranslations = 2
@@ -80,7 +85,9 @@ final class PipelineController {
                 try await self.startPipeline(runID: currentRun)
             } catch {
                 guard self.runID == currentRun else { return }
+                self.eventRunID = -1
                 await self.teardown()
+                guard self.runID == currentRun else { return }
                 self.state = .failed(error.localizedDescription)
             }
         }
@@ -109,14 +116,19 @@ final class PipelineController {
         subtitles.reset()
         subtitles.startSession()
 
+        eventRunID = currentRun
         try await engine.start(
             onEvent: { [weak self] event in
-                guard let self, self.runID == currentRun else { return }
+                guard let self, self.eventRunID == currentRun else { return }
                 self.handle(event)
             },
-            onError: { [weak self] error in
-                guard let self, self.runID == currentRun else { return }
-                self.warning = "识别出错：\(error.localizedDescription)"
+            onError: { [weak self] error, isFatal in
+                guard let self, self.eventRunID == currentRun else { return }
+                if isFatal {
+                    self.fail(with: "识别中断：\(error.localizedDescription)")
+                } else {
+                    self.warning = "识别出错：\(error.localizedDescription)"
+                }
             }
         )
         guard runID == currentRun else {
@@ -150,31 +162,50 @@ final class PipelineController {
     // MARK: 停止
 
     func stop() {
-        guard state.isActive else { return }
+        guard state.isActive, state != .stopping else { return }
         runID += 1
         state = .stopping
         startTask?.cancel()
+        finishSession { [weak self] in
+            self?.state = .idle
+        }
+    }
+
+    /// 识别引擎中断等致命错误：停止并显示错误
+    private func fail(with message: String) {
+        guard state.isActive, state != .stopping else { return }
+        runID += 1
+        state = .stopping
+        startTask?.cancel()
+        finishSession { [weak self] in
+            self?.state = .failed(message)
+        }
+    }
+
+    /// 停止捕获和识别；引擎停止前输出的最后结果仍会被处理，然后把剩余文本提交为字幕
+    private func finishSession(then completion: @escaping @MainActor () -> Void) {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.teardown()
-            // 输出剩余文本
+            self.eventRunID = -1
             self.commit(self.segmenter.flush(now: Date()))
             self.partialText = ""
             self.subtitles.clearLiveText()
-            self.state = .idle
+            completion()
         }
     }
 
     private func teardown() async {
         flushTask?.cancel()
         flushTask = nil
-        capture?.stop()
-        capture = nil
-        if let engine {
-            await engine.stop()
-        }
-        engine = nil
+        // 先取出并清空引用，避免与新一轮运行交错时误清掉新的引擎
+        let capture = self.capture
+        let engine = self.engine
+        self.capture = nil
+        self.engine = nil
         level = 0
+        capture?.stop()
+        await engine?.stop()
     }
 
     // MARK: 识别结果
@@ -236,6 +267,7 @@ final class PipelineController {
         guard !isTranslating, let translator, !pendingTranslations.isEmpty else { return }
         let job = pendingTranslations.removeFirst()
         let context = subtitles.recentOriginals(before: job.id, count: contextLines)
+        let generation = translationGeneration
         isTranslating = true
         translationTask = Task { @MainActor [weak self] in
             do {
@@ -244,18 +276,27 @@ final class PipelineController {
                 }
                 self?.subtitles.updateTranslation(id: job.id, text: result, isFinal: true)
                 if self?.warning?.hasPrefix("翻译") == true { self?.warning = nil }
-            } catch is CancellationError {
-                self?.subtitles.markTranslationSkipped(id: job.id)
             } catch {
-                self?.subtitles.markTranslationFailed(id: job.id, message: error.localizedDescription)
-                self?.warning = "翻译出错：\(error.localizedDescription)"
+                let cancelled = Task.isCancelled
+                    || error is CancellationError
+                    || (error as? URLError)?.code == .cancelled
+                if cancelled {
+                    self?.subtitles.markTranslationSkipped(id: job.id)
+                } else {
+                    self?.subtitles.markTranslationFailed(id: job.id, message: error.localizedDescription)
+                    if self?.translationGeneration == generation {
+                        self?.warning = "翻译出错：\(error.localizedDescription)"
+                    }
+                }
             }
-            self?.isTranslating = false
-            self?.pumpTranslations()
+            guard let self, self.translationGeneration == generation else { return }
+            self.isTranslating = false
+            self.pumpTranslations()
         }
     }
 
     private func cancelTranslations() {
+        translationGeneration += 1
         translationTask?.cancel()
         translationTask = nil
         pendingTranslations.removeAll()
@@ -267,6 +308,7 @@ final class PipelineController {
     private func makeTranscriptionEngine(_ settings: AppSettings) throws -> TranscriptionEngine {
         switch settings.transcriptionEngine {
         case .apple:
+            guard settings.sourceLanguage != "auto" else { throw TranscriptionError.autoDetectNotSupported }
             return AppleSpeechEngine(localeIdentifier: settings.sourceLanguage)
         case .openAICompatible:
             return OpenAICompatibleSTTEngine(

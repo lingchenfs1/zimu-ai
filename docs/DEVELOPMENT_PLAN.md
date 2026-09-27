@@ -157,6 +157,12 @@ zimu-ai/
 - 悬浮窗 `canBecomeKey = false`（不抢键盘焦点），因此内容视图要重写 `acceptsFirstMouse` 才能直接响应点击和拖动。
 - 系统音频权限被拒绝时，Process Tap 不会报错，只会收到静音数据 → 通过电平表和「录制 10 秒测试」来排查。
 - 同一次运行中字幕 id 单调递增（`SubtitleTimeline.reset()` 不重置 id），避免上一轮迟到的译文写到新字幕上。
+- 聚合设备优先只包含 Tap（参考 audiotee），不把输出设备加进来：带麦克风的输出设备（耳机、AirPods）会让聚合设备多出输入流并可能激活麦克风；失败时才退回 AudioCap 的「输出设备 + Tap」方式，并在回调中只取最后的 Tap buffer。
+- 不要把 `kAudioObjectUnknown` 放进 Tap 的排除列表，否则 `AudioHardwareCreateProcessTap` 返回 560947818，看起来像权限被拒。
+- SpeechAnalyzer 不需要 `SFSpeechRecognizer` 授权（只需系统录音权限）；`.fastResults` 可降低延迟；结果流抛错后会话结束，需关闭输入流并按致命错误处理。
+- `AnalyzerInputConverter` 等是 macOS 27 API，不能用；音频格式转换自己用 AVAudioConverter 做。
+- 停止识别时引擎还会吐出最后的定稿结果：接收事件的运行编号（eventRunID）要在引擎停止后才失效。
+- Apple 翻译在源语言与目标语言相同时（如 zh-CN → zh-Hans）直接返回原文，比较前先转成 maximalIdentifier。
 - 浏览器的声音通常来自子进程（如 `com.google.Chrome.helper`、Safari 的 `com.apple.WebKit.GPU`），指定应用捕获时按 bundle ID 前缀匹配；Safari 请在列表中选择 WebKit 进程或直接用「全部系统音频」。
 
 ## 6. 决策记录
@@ -170,6 +176,7 @@ zimu-ai/
 | D5 | 2026-09-27 | XcodeGen + ZimuCore 本地包 + GitHub Actions macos-26 | 工程文件纯文本易维护；纯逻辑可测试；云端容器无法编译 macOS 代码 |
 | D6 | 2026-09-27 | App target 使用 Swift 5 语言模式（Swift 6.2 编译器），ZimuCore 保持 Swift 6 严格并发 | 云端容器无法本地编译，Swift 6 模式的并发报错只能靠 CI 反复试；且 Swift 6 模式会对音频回调等 C 回调插入运行时隔离断言，容易在音频线程崩溃。平台代码自行保证线程安全（音频类标注 nonisolated / 专用队列） |
 | D7 | 2026-09-27 | `TranscriptionEngine` 协议放在 App 层（依赖 AVAudioPCMBuffer），`TranscriptEvent` 等数据类型放 ZimuCore；`TranslationEngine` 协议放 ZimuCore | 识别引擎输入是 AVFoundation 类型，ZimuCore 保持不依赖 Apple 专有框架 |
+| D9 | 2026-09-27 | 识别引擎的 prepare / start / stop 统一在 MainActor 上执行，append 可在任意线程 | 避免启动与停止交错时在多个线程读写引擎状态 |
 | D8 | 2026-09-27 | 允许任意 HTTP 地址（`NSAllowsArbitraryLoads`），设置窗口由自己管理的 NSWindow 承载 | 支持局域网 / 本机 Ollama 等 http 服务；菜单栏应用打开 SwiftUI Settings 场景时窗口不易置前 |
 
 ## 7. 进度日志
@@ -181,4 +188,5 @@ zimu-ai/
 - 2026-09-27 | 3.3 / 4.3 / 5.1（提前） | ZimuCore 纯逻辑：SubtitleSegmenter、SubtitleTimeline、OpenAI 兼容翻译 / 识别客户端、SSE 解析、EnergyVAD、WAV、SRT、设置模型 + 单元测试 | CI `swift test` | App 层接入在对应阶段完成
 - 2026-09-27 | 1.1–1.6 | 悬浮字幕窗、外观设置、锁定穿透、拖动缩放、位置记忆、演示字幕、菜单栏面板 | CI 构建通过 | 待用户实测（全屏视频之上是否可见、点击穿透）
 - 2026-09-27 | 2.x / 3.x / 4.x / 5.x / 6.x | 系统音频捕获（Process Tap）、Apple 识别 / 翻译引擎、云端识别、流水线、完整设置、钥匙串、快捷键、开机启动、SRT 导出 | CI 构建通过（无警告），ZimuCore 46 个单元测试通过 | 待用户实测：权限弹窗、识别效果与延迟、翻译语言包下载
+- 2026-09-27 | 2.1 / 3.2 / 3.4 / 4.2 / 6.5 | 按 SDK 核实与代码审查修复：Tap-only 聚合设备、输入 buffer 数不匹配、.fastResults、停止时保留最后结果、翻译队列代数、启停交错、致命识别错误、同语言翻译、开机启动错误提示、自动检测与 Apple 识别冲突 | CI 构建 | 待用户实测
 - 2026-09-27 | 7.2–7.4 | App 图标、DMG 打包脚本、CI 产出 DMG / Release、可选签名公证、README 使用说明 | CI 打包步骤 | 7.1 性能测量需真机；Developer ID 需用户提供证书

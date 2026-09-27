@@ -29,10 +29,19 @@ actor AppleTranslationEngine: TranslationEngine {
         self.target = Locale.Language(identifier: target)
     }
 
-    /// 检查语言包；原声语言为「自动检测」时跳过
+    /// 检查语言包；原声语言为「自动检测」或与目标语言相同时跳过
     func prepare() async throws {
         guard sourceCode != "auto" else { return }
-        _ = try await session(for: Locale.Language(identifier: sourceCode))
+        let source = Locale.Language(identifier: sourceCode)
+        guard !Self.isSameLanguage(source, target) else { return }
+        _ = try await session(for: source)
+    }
+
+    /// 比较语言和文字（zh-CN 与 zh-Hans 视为相同，zh-Hans 与 zh-Hant 不同）
+    static func isSameLanguage(_ lhs: Locale.Language, _ rhs: Locale.Language) -> Bool {
+        let a = Locale.Language(identifier: lhs.maximalIdentifier)
+        let b = Locale.Language(identifier: rhs.maximalIdentifier)
+        return a.languageCode == b.languageCode && a.script == b.script
     }
 
     func translate(
@@ -47,7 +56,7 @@ actor AppleTranslationEngine: TranslationEngine {
         } else {
             source = Locale.Language(identifier: sourceCode)
         }
-        if source.languageCode == target.languageCode && source.script == target.script {
+        if Self.isSameLanguage(source, target) {
             return text
         }
         let session = try await session(for: source)

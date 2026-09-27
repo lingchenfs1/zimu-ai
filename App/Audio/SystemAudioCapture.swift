@@ -54,7 +54,7 @@ final class SystemAudioCapture {
         description.muteBehavior = .unmuted
 
         var newTapID = AudioObjectID(kAudioObjectUnknown)
-        var status = AudioHardwareCreateProcessTap(description, &newTapID)
+        let status = AudioHardwareCreateProcessTap(description, &newTapID)
         guard status == noErr else {
             throw AudioCaptureError.coreAudio("创建音频 Tap", status)
         }
@@ -73,53 +73,23 @@ final class SystemAudioCapture {
             tapFormat = format
             NSLog("ZimuAI: tap format \(format)")
 
-            // 3. 创建包含 Tap 的私有聚合设备（以默认输出设备为时钟）
-            let outputDevice = try CoreAudioUtils.defaultOutputDevice()
-            let outputUID = try CoreAudioUtils.readString(outputDevice, kAudioDevicePropertyDeviceUID)
-            let aggregateDescription: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "ZimuAI Aggregate",
-                kAudioAggregateDeviceUIDKey: UUID().uuidString,
-                kAudioAggregateDeviceMainSubDeviceKey: outputUID,
-                kAudioAggregateDeviceIsPrivateKey: true,
-                kAudioAggregateDeviceIsStackedKey: false,
-                kAudioAggregateDeviceTapAutoStartKey: true,
-                kAudioAggregateDeviceSubDeviceListKey: [
-                    [kAudioSubDeviceUIDKey: outputUID],
-                ],
-                kAudioAggregateDeviceTapListKey: [
-                    [
-                        kAudioSubTapDriftCompensationKey: true,
-                        kAudioSubTapUIDKey: description.uuid.uuidString,
-                    ],
-                ],
-            ]
-            var newAggregateID = AudioObjectID(kAudioObjectUnknown)
-            status = AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &newAggregateID)
-            guard status == noErr else {
-                throw AudioCaptureError.coreAudio("创建聚合设备", status)
-            }
-            aggregateDeviceID = newAggregateID
-
-            // 4. 准备回调状态
+            // 3. 创建包含 Tap 的私有聚合设备，并注册 IOProc 启动。
+            //    优先使用「只含 Tap」的聚合设备（不把输出设备加进来，避免连带打开耳机麦克风）；
+            //    失败时退回 AudioCap 的做法（以默认输出设备为主设备）。
             queue.sync {
                 self.converter = outputFormat.map { AudioFormatConverter(outputFormat: $0) }
                 self.onBuffer = onBuffer
                 self.onLevel = onLevel
             }
-
-            // 5. 注册 IOProc 并启动
-            var procID: AudioDeviceIOProcID?
-            status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateDeviceID, queue) { [weak self] _, inputData, _, _, _ in
-                self?.handleInput(inputData, format: format)
-            }
-            guard status == noErr, let procID else {
-                throw AudioCaptureError.coreAudio("注册音频回调", status)
-            }
-            ioProcID = procID
-
-            status = AudioDeviceStart(aggregateDeviceID, procID)
-            guard status == noErr else {
-                throw AudioCaptureError.coreAudio("启动音频设备", status)
+            let tapUID = description.uuid.uuidString
+            do {
+                aggregateDeviceID = try createTapOnlyAggregate(tapUID: tapUID)
+                try startIO(format: format)
+            } catch {
+                NSLog("ZimuAI: tap-only aggregate failed (\(error)), falling back to output-device aggregate")
+                destroyAggregate()
+                aggregateDeviceID = try createOutputDeviceAggregate(tapUID: tapUID)
+                try startIO(format: format)
             }
             isRunning = true
         } catch {
@@ -129,15 +99,7 @@ final class SystemAudioCapture {
     }
 
     func stop() {
-        if aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
-            if let ioProcID {
-                AudioDeviceStop(aggregateDeviceID, ioProcID)
-                AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
-            }
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-        }
-        ioProcID = nil
-        aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+        destroyAggregate()
 
         if tapID != AudioObjectID(kAudioObjectUnknown) {
             AudioHardwareDestroyProcessTap(tapID)
@@ -156,6 +118,85 @@ final class SystemAudioCapture {
             self.converter = nil
         }
         isRunning = false
+    }
+
+    // MARK: 聚合设备
+
+    private func createTapOnlyAggregate(tapUID: String) throws -> AudioObjectID {
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "ZimuAI Aggregate",
+            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceSubDeviceListKey: [] as CFArray,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+        ]
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &deviceID)
+        guard status == noErr else { throw AudioCaptureError.coreAudio("创建聚合设备", status) }
+
+        var address = CoreAudioUtils.makeAddress(kAudioAggregateDevicePropertyTapList)
+        var tapList = [tapUID] as CFArray
+        status = withUnsafeMutablePointer(to: &tapList) { pointer in
+            AudioObjectSetPropertyData(deviceID, &address, 0, nil, UInt32(MemoryLayout<CFArray>.stride), pointer)
+        }
+        guard status == noErr else {
+            AudioHardwareDestroyAggregateDevice(deviceID)
+            throw AudioCaptureError.coreAudio("把 Tap 加入聚合设备", status)
+        }
+        return deviceID
+    }
+
+    private func createOutputDeviceAggregate(tapUID: String) throws -> AudioObjectID {
+        let outputDevice = try CoreAudioUtils.defaultOutputDevice()
+        let outputUID = try CoreAudioUtils.readString(outputDevice, kAudioDevicePropertyDeviceUID)
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "ZimuAI Aggregate",
+            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceSubDeviceListKey: [
+                [kAudioSubDeviceUIDKey: outputUID],
+            ],
+            kAudioAggregateDeviceTapListKey: [
+                [
+                    kAudioSubTapDriftCompensationKey: true,
+                    kAudioSubTapUIDKey: tapUID,
+                ],
+            ],
+        ]
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &deviceID)
+        guard status == noErr else { throw AudioCaptureError.coreAudio("创建聚合设备", status) }
+        return deviceID
+    }
+
+    private func startIO(format: AVAudioFormat) throws {
+        var procID: AudioDeviceIOProcID?
+        var status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateDeviceID, queue) { [weak self] _, inputData, _, _, _ in
+            self?.handleInput(inputData, format: format)
+        }
+        guard status == noErr, let procID else {
+            throw AudioCaptureError.coreAudio("注册音频回调", status)
+        }
+        ioProcID = procID
+        status = AudioDeviceStart(aggregateDeviceID, procID)
+        guard status == noErr else {
+            throw AudioCaptureError.coreAudio("启动音频设备", status)
+        }
+    }
+
+    private func destroyAggregate() {
+        if aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
+            if let ioProcID {
+                AudioDeviceStop(aggregateDeviceID, ioProcID)
+                AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            }
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+        }
+        ioProcID = nil
+        aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     }
 
     /// 调试：把接下来 duration 秒的系统音频录成 WAV
