@@ -57,8 +57,8 @@ final class SubtitleStore {
         now = Date()
     }
 
-    func setLiveTranslation(_ text: String, source: String) {
-        timeline.setLiveTranslation(text, source: source)
+    func setLiveTranslation(_ text: String, source: String, isComplete: Bool) {
+        timeline.setLiveTranslation(text, source: source, isComplete: isComplete)
         now = Date()
     }
 

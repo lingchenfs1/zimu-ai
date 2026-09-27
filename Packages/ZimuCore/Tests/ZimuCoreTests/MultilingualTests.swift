@@ -29,6 +29,13 @@ final class TranslationSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[4]])
     }
 
+    func testJobsWithoutLanguageAreNotBatched() {
+        var scheduler = TranslationScheduler(maxConcurrent: 1, maxQueued: 10, maxBatchSize: 4)
+        scheduler.enqueue(job(1, nil))
+        scheduler.enqueue(job(2, nil))
+        XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[1]])
+    }
+
     func testDropsOldestWhenBacklogTooLong() {
         var scheduler = TranslationScheduler(maxConcurrent: 1, maxQueued: 2, maxBatchSize: 1)
         XCTAssertEqual(scheduler.enqueue(job(1)), [])
@@ -54,6 +61,17 @@ final class LanguageSelectorTests: XCTestCase {
         selector.record(language: "zh-CN", confidence: 0.82, characters: 20)
         selector.record(language: "zh-CN", confidence: 0.83, characters: 20)
         XCTAssertEqual(selector.active, "en-US")
+    }
+
+    func testSwitchesWhenActiveLanguageGoesQuiet() {
+        var selector = LanguageSelector(candidates: ["en-US", "ja-JP"])
+        selector.record(language: "en-US", confidence: 0.9, characters: 30)
+        var switched = false
+        for _ in 0..<6 where !switched {
+            switched = selector.record(language: "ja-JP", confidence: 0.7, characters: 20)
+        }
+        XCTAssertTrue(switched)
+        XCTAssertEqual(selector.active, "ja-JP")
     }
 
     func testIgnoresUnknownLanguage() {
@@ -100,6 +118,14 @@ final class LiveTranslationTests: XCTestCase {
         timeline.setLiveTranslation("你好。", source: "Hello")
         XCTAssertEqual(timeline.reusableLiveTranslation(for: "Hello."), "你好。")
         XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello there."))
+    }
+
+    func testStreamingLiveTranslationIsNotReused() {
+        var timeline = SubtitleTimeline()
+        timeline.setLiveTranslation("你", source: "Hello", isComplete: false)
+        XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello"))
+        timeline.setLiveTranslation("你好", source: "Hello", isComplete: true)
+        XCTAssertEqual(timeline.reusableLiveTranslation(for: "Hello"), "你好")
     }
 
     func testCommitKeepsLanguage() {

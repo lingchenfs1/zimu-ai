@@ -108,6 +108,8 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
     // 以下状态只在 MainActor 上访问
     private var selector: LanguageSelector?
     private var latestPartial: [String: String] = [:]
+    /// 已输出的定稿结果覆盖到的音频时间（秒）；各语言识别器会对同一段音频各出一份结果，避免重复输出
+    private var emittedUntil: Double = -1
     /// 当前判断的语言（BCP-47）
     @MainActor private(set) var activeLanguage: String?
     @MainActor var onActiveLanguageChange: ((String) -> Void)?
@@ -160,6 +162,7 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
         self.selector = selector
         activeLanguage = selector.active
         latestPartial = [:]
+        emittedUntil = -1
         let inputSequence = input.makeStream()
         let input = self.input
 
@@ -172,7 +175,16 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
                         let text = String(result.text.characters)
                         let confidence = Self.averageConfidence(result.text)
                         let isFinal = result.isFinal
-                        await self?.handle(language: language, text: text, isFinal: isFinal, confidence: confidence, onEvent: onEvent)
+                        let start = result.range.start.seconds
+                        let end = result.range.end.seconds
+                        await self?.handle(
+                            language: language,
+                            text: text,
+                            isFinal: isFinal,
+                            confidence: confidence,
+                            timeRange: (start, end),
+                            onEvent: onEvent
+                        )
                     }
                 } catch is CancellationError {
                     // 正常停止
@@ -192,7 +204,14 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
     }
 
     @MainActor
-    private func handle(language: String, text: String, isFinal: Bool, confidence: Double?, onEvent: @MainActor (TranscriptEvent) -> Void) {
+    private func handle(
+        language: String,
+        text: String,
+        isFinal: Bool,
+        confidence: Double?,
+        timeRange: (start: Double, end: Double),
+        onEvent: @MainActor (TranscriptEvent) -> Void
+    ) {
         guard var selector else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if isFinal {
@@ -206,8 +225,13 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
                 NSLog("ZimuAI: multilingual switched to \(selector.active)")
             }
             if language == selector.active {
-                if !trimmed.isEmpty {
+                // 切换语言时，旧语言可能已经输出过同一段音频的结果：与已输出部分重叠的结果跳过
+                let overlaps = timeRange.start.isFinite && timeRange.start < emittedUntil - 0.3
+                if !trimmed.isEmpty, !overlaps {
                     onEvent(.final(trimmed, language: language))
+                }
+                if timeRange.end.isFinite {
+                    emittedUntil = max(emittedUntil, timeRange.end)
                 }
                 onEvent(.partial(""))
             }

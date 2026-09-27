@@ -11,8 +11,15 @@ public struct LanguageSelector: Sendable {
     /// 切换前该语言至少要有几个结果
     public var minimumSamples: Int = 2
 
+    /// 当前语言连续多少个结果没有出现后开始衰减它的得分
+    public var missesBeforeDecay: Int = 3
+    /// 每多错过一个结果，当前语言得分乘以这个系数
+    public var decayFactor: Double = 0.85
+
     private var scores: [String: Double] = [:]
     private var samples: [String: Int] = [:]
+    /// 当前语言连续没有出结果的次数（其他语言出结果时累加）
+    private var activeMisses = 0
 
     public init(candidates: [String]) {
         precondition(!candidates.isEmpty, "at least one candidate language")
@@ -42,9 +49,19 @@ public struct LanguageSelector: Sendable {
         scores[language] = previous * (1 - weight) + clamped * weight
         samples[language, default: 0] += 1
 
-        guard language != active, sampleCount(for: language) >= minimumSamples else { return false }
+        if language == active {
+            activeMisses = 0
+            return false
+        }
+        // 当前语言的识别器长时间没有结果（可能已不在说这种语言），逐步降低它的得分
+        activeMisses += 1
+        if activeMisses >= missesBeforeDecay, let activeScore = scores[active] {
+            scores[active] = activeScore * decayFactor
+        }
+        guard sampleCount(for: language) >= minimumSamples else { return false }
         if score(for: language) > score(for: active) + switchMargin {
             active = language
+            activeMisses = 0
             return true
         }
         return false
@@ -53,6 +70,7 @@ public struct LanguageSelector: Sendable {
     public mutating func reset() {
         scores.removeAll()
         samples.removeAll()
+        activeMisses = 0
         active = candidates[0]
     }
 }

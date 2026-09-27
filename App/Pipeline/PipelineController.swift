@@ -49,7 +49,10 @@ final class PipelineController {
 
     // 翻译（决策 D12）
     @ObservationIgnored private var scheduler = TranslationScheduler()
-    @ObservationIgnored private var translationTasks: [Task<Void, Never>] = []
+    @ObservationIgnored private var translationTasks: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var nextTranslationTaskID = 0
+    /// 当前 warning 是否来自翻译出错（翻译成功后只清除这一类提示）
+    @ObservationIgnored private var warningIsTranslationError = false
     /// 翻译代数：取消后旧任务的结果不再写入
     @ObservationIgnored private var translationGeneration = 0
     @ObservationIgnored private var contextLines = 3
@@ -82,6 +85,7 @@ final class PipelineController {
         runID += 1
         let currentRun = runID
         warning = nil
+        warningIsTranslationError = false
         activeLanguage = nil
         state = .preparing("正在准备…")
         startTask = Task { @MainActor [weak self] in
@@ -104,7 +108,8 @@ final class PipelineController {
         self.engine = engine
 
         let format = try await engine.prepare { [weak self] message in
-            guard let self, self.runID == currentRun else { return }
+            // 下载进度回调可能晚到：只在仍处于准备阶段时更新
+            guard let self, self.runID == currentRun, case .preparing = self.state else { return }
             self.state = .preparing(message)
         }
         try Task.checkCancellation()
@@ -333,15 +338,18 @@ final class PipelineController {
         guard let translator else { return }
         let generation = translationGeneration
         for batch in scheduler.nextBatches() {
+            nextTranslationTaskID += 1
+            let taskID = nextTranslationTaskID
             let task = Task { @MainActor [weak self] in
                 await self?.runTranslation(batch, translator: translator, generation: generation)
-                guard let self, self.translationGeneration == generation else { return }
+                guard let self else { return }
+                self.translationTasks[taskID] = nil
+                guard self.translationGeneration == generation else { return }
                 self.scheduler.finishBatch()
                 self.pumpTranslations()
             }
-            translationTasks.append(task)
+            translationTasks[taskID] = task
         }
-        translationTasks.removeAll { $0.isCancelled }
     }
 
     private func runTranslation(_ batch: [TranslationJob], translator: TranslationEngine, generation: Int) async {
@@ -361,7 +369,10 @@ final class PipelineController {
                     subtitles.updateTranslation(id: job.id, text: text, isFinal: true)
                 }
             }
-            if warning?.hasPrefix("翻译") == true { warning = nil }
+            if warningIsTranslationError {
+                warning = nil
+                warningIsTranslationError = false
+            }
         } catch {
             let cancelled = Task.isCancelled
                 || error is CancellationError
@@ -375,13 +386,14 @@ final class PipelineController {
             }
             if !cancelled, translationGeneration == generation {
                 warning = "翻译出错：\(error.localizedDescription)"
+                warningIsTranslationError = true
             }
         }
     }
 
     private func cancelTranslations() {
         translationGeneration += 1
-        translationTasks.forEach { $0.cancel() }
+        translationTasks.values.forEach { $0.cancel() }
         translationTasks.removeAll()
         scheduler.reset()
         liveTranslationTask?.cancel()
@@ -426,10 +438,11 @@ final class PipelineController {
         do {
             let result = try await translator.translate(source, sourceLanguage: language, context: []) { [weak self] partial in
                 guard let self, self.translationGeneration == generation else { return }
-                self.subtitles.setLiveTranslation(partial, source: source)
+                // 流式片段：只用于显示，不能在整句提交时复用
+                self.subtitles.setLiveTranslation(partial, source: source, isComplete: false)
             }
             guard translationGeneration == generation else { return }
-            subtitles.setLiveTranslation(result, source: source)
+            subtitles.setLiveTranslation(result, source: source, isComplete: true)
         } catch {
             // 实时翻译失败不影响整句翻译，忽略
         }

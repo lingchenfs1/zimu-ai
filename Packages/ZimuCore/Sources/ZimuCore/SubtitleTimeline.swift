@@ -63,6 +63,8 @@ public struct SubtitleTimeline: Sendable {
     /// 识别中文字的实时译文，以及它对应的原文
     public private(set) var liveTranslation: String = ""
     public private(set) var liveTranslationSource: String = ""
+    /// 实时译文是否已完整（流式输出中为 false，不能复用为整句译文）
+    public private(set) var liveTranslationIsComplete = false
     public private(set) var sessionStart: Date?
     public var historyLimit: Int = 5000
     private var nextID = 1
@@ -80,10 +82,11 @@ public struct SubtitleTimeline: Sendable {
         liveUpdatedAt = date
     }
 
-    /// 设置实时译文（source 是翻译时的原文快照）
-    public mutating func setLiveTranslation(_ translation: String, source: String) {
+    /// 设置实时译文（source 是翻译时的原文快照；流式输出中的片段 isComplete 为 false）
+    public mutating func setLiveTranslation(_ translation: String, source: String, isComplete: Bool = true) {
         liveTranslation = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         liveTranslationSource = source
+        liveTranslationIsComplete = isComplete
     }
 
     /// 实时译文是否仍然对应当前的识别文字（当前文字以翻译时的原文开头）
@@ -96,7 +99,7 @@ public struct SubtitleTimeline: Sendable {
 
     /// 如果实时译文恰好对应这句原文，返回它（提交整句时可直接复用，省去一次翻译）
     public func reusableLiveTranslation(for text: String) -> String? {
-        guard !liveTranslation.isEmpty else { return nil }
+        guard liveTranslationIsComplete, !liveTranslation.isEmpty else { return nil }
         let source = TextUtilities.normalizedForComparison(liveTranslationSource)
         return !source.isEmpty && source == TextUtilities.normalizedForComparison(text) ? liveTranslation : nil
     }
@@ -184,6 +187,7 @@ public struct SubtitleTimeline: Sendable {
         liveUpdatedAt = nil
         liveTranslation = ""
         liveTranslationSource = ""
+        liveTranslationIsComplete = false
     }
 
     /// 清空字幕。id 不会重新从 1 开始，避免上一轮迟到的译文写到新字幕上。
@@ -193,6 +197,7 @@ public struct SubtitleTimeline: Sendable {
         liveUpdatedAt = nil
         liveTranslation = ""
         liveTranslationSource = ""
+        liveTranslationIsComplete = false
         sessionStart = nil
     }
 }

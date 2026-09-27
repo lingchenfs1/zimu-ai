@@ -55,13 +55,25 @@ final class WhisperKitTranscriber: SegmentTranscriber {
         return support.appendingPathComponent("ZimuAI/WhisperKit", isDirectory: true)
     }
 
-    static func isModelDownloaded(_ model: String) -> Bool {
-        let folder = modelsDirectory
+    static func modelFolder(_ model: String) -> URL {
+        modelsDirectory
             .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
             .appendingPathComponent(model, isDirectory: true)
-        let contents = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-        return !contents.isEmpty
     }
+
+    /// 模型是否已完整下载（三个 Core ML 模型都在；中断的下载不算）
+    static func isModelDownloaded(_ model: String) -> Bool {
+        let folder = modelFolder(model)
+        return ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { name in
+            FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(name).mlmodelc").path)
+        }
+    }
+}
+
+/// WhisperKit 不是 Sendable，装进盒子里才能作为 Task 的结果传递（只在 WhisperKitRunner 内使用）
+final class WhisperKitBox: @unchecked Sendable {
+    let kit: WhisperKit
+    init(_ kit: WhisperKit) { self.kit = kit }
 }
 
 /// 持有 WhisperKit 实例的 actor（WhisperKit 不是 Sendable，只在这里使用）
@@ -70,12 +82,37 @@ actor WhisperKitRunner {
 
     private var pipe: WhisperKit?
     private var loadedModel: String?
+    /// 正在进行的加载（同一模型的并发请求共用；避免重复下载和编译）
+    private var loading: (model: String, task: Task<WhisperKitBox, Error>)?
+    /// 最后一次请求的模型；较早的请求完成时不会覆盖它
+    private var requestedModel: String?
 
     func load(model: String, endpoint: String, status: @escaping @MainActor (String) -> Void) async throws {
+        requestedModel = model
         if pipe != nil, loadedModel == model { return }
-        pipe = nil
-        loadedModel = nil
+        let task: Task<WhisperKitBox, Error>
+        if let current = loading, current.model == model {
+            task = current.task
+        } else {
+            task = Task {
+                WhisperKitBox(try await Self.makePipe(model: model, endpoint: endpoint, status: status))
+            }
+            loading = (model, task)
+        }
+        do {
+            let box = try await task.value
+            if loading?.model == model { loading = nil }
+            if requestedModel == model {
+                pipe = box.kit
+                loadedModel = model
+            }
+        } catch {
+            if loading?.model == model { loading = nil }
+            throw error
+        }
+    }
 
+    private static func makePipe(model: String, endpoint: String, status: @escaping @MainActor (String) -> Void) async throws -> WhisperKit {
         let base = WhisperKitTranscriber.modelsDirectory
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         var remote = endpoint.isEmpty ? Self.defaultEndpoint : endpoint
@@ -88,19 +125,26 @@ actor WhisperKitRunner {
         }
 
         await status("正在准备 Whisper 模型…")
-        let folder = try await WhisperKit.download(
-            variant: model,
-            downloadBase: base,
-            useBackgroundSession: false,
-            from: "argmaxinc/whisperkit-coreml",
-            endpoint: remote
-        ) { progress in
-            let percent = Int(progress.fractionCompleted * 100)
-            Task { @MainActor in
-                status("正在下载 Whisper 模型… \(percent)%")
+        let folder: URL
+        if WhisperKitTranscriber.isModelDownloaded(model) {
+            // 已完整下载：直接使用本地模型（WhisperKit.download 每次都会联网检查，离线时会失败）
+            folder = WhisperKitTranscriber.modelFolder(model)
+        } else {
+            folder = try await WhisperKit.download(
+                variant: model,
+                downloadBase: base,
+                useBackgroundSession: false,
+                from: "argmaxinc/whisperkit-coreml",
+                endpoint: remote
+            ) { progress in
+                let percent = Int(progress.fractionCompleted * 100)
+                Task { @MainActor in
+                    status("正在下载 Whisper 模型… \(percent)%")
+                }
             }
+            // v1.1.0 中取消下载不会抛错，这里自己检查
+            try Task.checkCancellation()
         }
-        try Task.checkCancellation()
 
         await status("正在加载 Whisper 模型（第一次加载需要编译，可能要一两分钟）…")
         let config = WhisperKitConfig(
@@ -115,8 +159,7 @@ actor WhisperKitRunner {
             load: true,
             download: false
         )
-        pipe = try await WhisperKit(config)
-        loadedModel = model
+        return try await WhisperKit(config)
     }
 
     func transcribe(_ samples: [Float], language: String?) async throws -> (text: String, language: String?) {

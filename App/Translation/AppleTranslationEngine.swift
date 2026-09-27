@@ -23,6 +23,25 @@ actor AppleTranslationEngine: TranslationEngine {
     private let sourceCode: String
     private let target: Locale.Language
     private var sessions: [String: TranslationSession] = [:]
+    /// 串行化翻译请求：实时翻译与整句批量翻译不在同一个会话上并发执行
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquire() async {
+        if !busy {
+            busy = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            busy = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
 
     init(source: String, target: String) {
         self.sourceCode = source
@@ -72,25 +91,48 @@ actor AppleTranslationEngine: TranslationEngine {
             return text
         }
         let session = try await session(for: source)
+        await acquire()
+        defer { release() }
         let response = try await session.translate(text)
         return response.targetText
     }
 
-    /// 一次翻译多句（Apple 翻译的批量接口比逐句调用快）
+    /// 一次翻译多句（Apple 翻译的批量接口比逐句调用快）。
+    /// 没有指定源语言时逐句判断语言，按语言分组后分别批量翻译。
     func translateBatch(_ texts: [String], sourceLanguage: String?) async throws -> [String] {
-        guard let first = texts.first, let source = resolveSource(for: first, hint: sourceLanguage) else { return texts }
-        if Self.isSameLanguage(source, target) {
-            return texts
-        }
-        let session = try await session(for: source)
-        let requests = texts.enumerated().map { index, text in
-            TranslationSession.Request(sourceText: text, clientIdentifier: String(index))
-        }
-        let responses = try await session.translations(from: requests)
         var results = texts
-        for response in responses {
-            if let identifier = response.clientIdentifier, let index = Int(identifier), results.indices.contains(index) {
-                results[index] = response.targetText
+        var groups: [String: (language: Locale.Language, indices: [Int])] = [:]
+        var order: [String] = []
+        for (index, text) in texts.enumerated() {
+            guard let source = resolveSource(for: text, hint: sourceLanguage),
+                  !Self.isSameLanguage(source, target)
+            else { continue }
+            let key = source.maximalIdentifier
+            if groups[key] == nil {
+                groups[key] = (source, [])
+                order.append(key)
+            }
+            groups[key]?.indices.append(index)
+        }
+        for key in order {
+            guard let group = groups[key] else { continue }
+            let session = try await session(for: group.language)
+            let requests = group.indices.map { index in
+                TranslationSession.Request(sourceText: texts[index], clientIdentifier: String(index))
+            }
+            await acquire()
+            let responses: [TranslationSession.Response]
+            do {
+                responses = try await session.translations(from: requests)
+                release()
+            } catch {
+                release()
+                throw error
+            }
+            for response in responses {
+                if let identifier = response.clientIdentifier, let index = Int(identifier), results.indices.contains(index) {
+                    results[index] = response.targetText
+                }
             }
         }
         return results
@@ -123,6 +165,8 @@ actor AppleTranslationEngine: TranslationEngine {
         @unknown default:
             break
         }
+        // 等待期间可能已被其他调用创建
+        if let existing = sessions[key] { return existing }
         let session = TranslationSession(installedSource: source, target: target)
         sessions[key] = session
         return session

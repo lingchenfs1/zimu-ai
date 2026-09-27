@@ -177,6 +177,8 @@ zimu-ai/
 - 停止识别时引擎还会吐出最后的定稿结果：接收事件的运行编号（eventRunID）要在引擎停止后才失效。
 - Apple 翻译在源语言与目标语言相同时（如 zh-CN → zh-Hans）直接返回原文，比较前先转成 maximalIdentifier。
 - WhisperKit 与 ZimuCore 都有 `EnergyVAD` / `TextUtilities` 类型：`WhisperKitTranscriber.swift` 不能 import ZimuCore。WhisperKit 自动检测语言必须同时设 `usePrefillPrompt: true` 和 `detectLanguage: true`；分词器下载只认 `HF_ENDPOINT` 环境变量。
+- WhisperKit 1.1.0 的 `WhisperKit.download` 每次都会联网检查文件，模型已完整下载时要直接用本地目录；取消下载不会抛错，需自己检查 `Task.isCancelled`。
+- 多语言并行识别时，各语言识别器会对同一段音频各输出一份定稿结果：切换语言时按音频时间范围去重。
 - 第一次系统音频授权会阻塞调用线程：Core Audio 的 Tap / 聚合设备操作只能在后台队列执行（D11）。
 - 浏览器的声音通常来自子进程（如 `com.google.Chrome.helper`、Safari 的 `com.apple.WebKit.GPU`），指定应用捕获时按 bundle ID 前缀匹配；Safari 请在列表中选择 WebKit 进程或直接用「全部系统音频」。
 
@@ -215,3 +217,4 @@ zimu-ai/
 - 2026-09-27 | 7.3 | PR 已合并（a91a794）；会话推送标签被拒（403），改为给 CI 增加手动发布入口（D10），合并后触发 `release_tag=v1.0.0` | Release 工作流结果与 Release 页面 | 同上
 - 2026-09-27 | 7.3 | v1.0.0 已发布（Release 附 ZimuAI-1.0.0.dmg） | Release 页面 | 无
 - 2026-09-27 | 8.1–8.7 | 实测反馈改进：音频捕获后台启动 + 授权提示；退出前停止捕获 + 兜底退出；实时翻译 + 复用 + 批量 / 并发调度；Apple 多语言并行识别（LanguageSelector）；WhisperKit 引擎（argmax-oss-swift 1.1.0）；识别结果带语言；设置界面四种引擎；版本号 1.1.0 | 本地用 macOS 26.5 SDK 类型检查（含真实 WhisperKit 源码）零错误零警告；ZimuCore 新增单元测试；CI | 全部待用户实测
+- 2026-09-27 | 8.3–8.5 | 按代码审查修复：流式中的实时译文不再被当作整句译文复用；WhisperKit 已下载时离线加载、并发加载去重；多语言切换时按音频时间去重，当前语言长时间无结果时衰减得分；未知语言的句子不合并批量、Apple 批量翻译按语言分组；Apple 翻译请求串行化；翻译提示清除、任务表泄漏、下载进度覆盖状态 | 本地 SDK 类型检查零错误零警告；新增单元测试 | 待用户实测

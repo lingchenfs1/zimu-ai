@@ -86,13 +86,13 @@ public struct TranslationScheduler: Sendable {
         return dropped
     }
 
-    /// 取出现在可以开始的批次（每批中的句子语言相同）
+    /// 取出现在可以开始的批次（每批中的句子语言相同；语言未知的句子不合并，避免混入不同语言）
     public mutating func nextBatches() -> [[TranslationJob]] {
         var batches: [[TranslationJob]] = []
         while runningCount < maxConcurrent, let first = queued.first {
             var batch = [first]
             var index = 1
-            while batch.count < maxBatchSize, index < queued.count, queued[index].language == first.language {
+            while first.language != nil, batch.count < maxBatchSize, index < queued.count, queued[index].language == first.language {
                 batch.append(queued[index])
                 index += 1
             }
