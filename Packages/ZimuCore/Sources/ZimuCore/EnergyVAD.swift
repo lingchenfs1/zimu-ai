@@ -24,6 +24,9 @@ public struct EnergyVAD: Sendable {
 
     public var configuration: Configuration
     public private(set) var isSpeaking = false
+
+    /// 正在进行中的片段（说话中，尚未结束）
+    public var currentSegment: [Float] { isSpeaking ? segment : [] }
     public private(set) var noiseFloor: Float = 0.002
 
     private var carry: [Float] = []

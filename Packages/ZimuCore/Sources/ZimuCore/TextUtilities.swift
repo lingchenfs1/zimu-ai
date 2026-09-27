@@ -43,6 +43,20 @@ public enum TextUtilities {
         return a + " " + b
     }
 
+    /// 去掉空白和标点并转小写，用于比较识别文字是否「基本相同」
+    public static func normalizedForComparison(_ text: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            if scalar.properties.isWhitespace
+                || CharacterSet.punctuationCharacters.contains(scalar)
+                || CharacterSet.symbols.contains(scalar) {
+                continue
+            }
+            scalars.append(scalar)
+        }
+        return String(scalars).lowercased()
+    }
+
     /// 是否只包含标点和空白
     public static func isOnlyPunctuation(_ text: String) -> Bool {
         text.unicodeScalars.allSatisfy { scalar in

@@ -4,8 +4,8 @@ import Foundation
 public enum TranscriptEvent: Sendable, Equatable {
     /// 草稿：会被后续草稿或定稿替换
     case partial(String)
-    /// 定稿片段：增量文本，不会再变化
-    case final(String)
+    /// 定稿片段：增量文本，不会再变化；language 为识别出的语言（BCP-47，未知为 nil）
+    case final(String, language: String? = nil)
 }
 
 /// 一条字幕（原文 + 译文）
@@ -30,8 +30,19 @@ public struct SubtitleEntry: Identifiable, Sendable, Equatable {
     public var start: Date
     public var end: Date
     public var updatedAt: Date
+    /// 原文语言（BCP-47，未知为 nil）
+    public var language: String?
 
-    public init(id: Int, original: String, translation: String = "", state: TranslationState, start: Date, end: Date, updatedAt: Date) {
+    public init(
+        id: Int,
+        original: String,
+        translation: String = "",
+        state: TranslationState,
+        start: Date,
+        end: Date,
+        updatedAt: Date,
+        language: String? = nil
+    ) {
         self.id = id
         self.original = original
         self.translation = translation
@@ -39,6 +50,7 @@ public struct SubtitleEntry: Identifiable, Sendable, Equatable {
         self.start = start
         self.end = end
         self.updatedAt = updatedAt
+        self.language = language
     }
 }
 
@@ -48,6 +60,9 @@ public struct SubtitleTimeline: Sendable {
     /// 正在识别中的文本（已定稿但未成句的部分 + 草稿）
     public private(set) var liveText: String = ""
     public private(set) var liveUpdatedAt: Date?
+    /// 识别中文字的实时译文，以及它对应的原文
+    public private(set) var liveTranslation: String = ""
+    public private(set) var liveTranslationSource: String = ""
     public private(set) var sessionStart: Date?
     public var historyLimit: Int = 5000
     private var nextID = 1
@@ -65,6 +80,27 @@ public struct SubtitleTimeline: Sendable {
         liveUpdatedAt = date
     }
 
+    /// 设置实时译文（source 是翻译时的原文快照）
+    public mutating func setLiveTranslation(_ translation: String, source: String) {
+        liveTranslation = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        liveTranslationSource = source
+    }
+
+    /// 实时译文是否仍然对应当前的识别文字（当前文字以翻译时的原文开头）
+    public var liveTranslationMatchesLiveText: Bool {
+        guard !liveTranslation.isEmpty, !liveTranslationSource.isEmpty else { return false }
+        let live = TextUtilities.normalizedForComparison(liveText)
+        let source = TextUtilities.normalizedForComparison(liveTranslationSource)
+        return !source.isEmpty && live.hasPrefix(source)
+    }
+
+    /// 如果实时译文恰好对应这句原文，返回它（提交整句时可直接复用，省去一次翻译）
+    public func reusableLiveTranslation(for text: String) -> String? {
+        guard !liveTranslation.isEmpty else { return nil }
+        let source = TextUtilities.normalizedForComparison(liveTranslationSource)
+        return !source.isEmpty && source == TextUtilities.normalizedForComparison(text) ? liveTranslation : nil
+    }
+
     /// 提交一条完整字幕，返回它的 id
     @discardableResult
     public mutating func commit(_ segment: SubtitleSegment, needsTranslation: Bool, at date: Date) -> Int {
@@ -77,13 +113,17 @@ public struct SubtitleTimeline: Sendable {
             state: needsTranslation ? .pending : .none,
             start: segment.start,
             end: segment.end,
-            updatedAt: date
+            updatedAt: date,
+            language: segment.language
         ))
         if entries.count > historyLimit {
             entries.removeFirst(entries.count - historyLimit)
         }
         return id
     }
+
+    /// 最新一条字幕的 id
+    public var latestID: Int? { entries.last?.id }
 
     public func entry(id: Int) -> SubtitleEntry? {
         entries.last(where: { $0.id == id })
@@ -142,6 +182,8 @@ public struct SubtitleTimeline: Sendable {
     public mutating func clearLiveText() {
         liveText = ""
         liveUpdatedAt = nil
+        liveTranslation = ""
+        liveTranslationSource = ""
     }
 
     /// 清空字幕。id 不会重新从 1 开始，避免上一轮迟到的译文写到新字幕上。
@@ -149,6 +191,8 @@ public struct SubtitleTimeline: Sendable {
         entries.removeAll()
         liveText = ""
         liveUpdatedAt = nil
+        liveTranslation = ""
+        liveTranslationSource = ""
         sessionStart = nil
     }
 }

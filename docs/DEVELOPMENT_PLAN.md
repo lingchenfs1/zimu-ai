@@ -146,6 +146,19 @@ zimu-ai/
 
 **验收**：在一台干净的 macOS 26 机器上从 DMG 安装并完整跑通。
 
+### 阶段 8：v1.1 用户实测反馈（2026-09-27）
+> 反馈：① 翻译速度跟不上识别（Apple 本地翻译）；② 第一次请求权限时卡住；③ 菜单栏「退出」无法关闭软件；④ 需要同时识别多种语言、自动判断原声语言（三种方案都做，设置中切换）。
+
+- [ ] 8.1 权限卡住：音频捕获的创建 / 启动 / 停止移到后台线程，等待授权时界面不冻结并显示提示（待用户实测）
+- [ ] 8.2 退出：退出前在后台停止音频捕获（带超时），`applicationShouldTerminate` 延迟退出，超时兜底强制退出（待用户实测）
+- [ ] 8.3 翻译提速：识别中的文字实时翻译（节流）、句子提交时复用实时译文、翻译并发 + Apple 批量翻译、积压时丢弃最旧（待用户实测）
+- [ ] 8.4 多语言方案一：Apple 多语言并行识别，按识别置信度自动切换（候选 2～4 种语言）（待用户实测）
+- [ ] 8.5 多语言方案二：WhisperKit 本地识别引擎，自动检测语言，模型下载支持镜像地址（待用户实测）
+- [ ] 8.6 多语言方案三：云端识别「自动检测」入口；识别结果携带语言，翻译按识别出的语言选择源语言（待用户实测）
+- [ ] 8.7 设置界面：识别引擎四选一及各自设置；翻译增加「实时翻译」「并发数」「额外请求参数」
+
+**验收**：Apple 本地翻译时译文与原文基本同步；首次授权不卡顿；菜单栏退出立即生效；三种多语言方案都能在中英日混合内容上自动切换语言。
+
 ## 5. 关键技术要点 / 已知坑
 
 - 喂给 SpeechAnalyzer 的 buffer 必须先转换为 `SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith:)` 返回的格式；格式不符时**不会报错，但也没有任何识别结果**。
@@ -163,6 +176,8 @@ zimu-ai/
 - `AnalyzerInputConverter` 等是 macOS 27 API，不能用；音频格式转换自己用 AVAudioConverter 做。
 - 停止识别时引擎还会吐出最后的定稿结果：接收事件的运行编号（eventRunID）要在引擎停止后才失效。
 - Apple 翻译在源语言与目标语言相同时（如 zh-CN → zh-Hans）直接返回原文，比较前先转成 maximalIdentifier。
+- WhisperKit 与 ZimuCore 都有 `EnergyVAD` / `TextUtilities` 类型：`WhisperKitTranscriber.swift` 不能 import ZimuCore。WhisperKit 自动检测语言必须同时设 `usePrefillPrompt: true` 和 `detectLanguage: true`；分词器下载只认 `HF_ENDPOINT` 环境变量。
+- 第一次系统音频授权会阻塞调用线程：Core Audio 的 Tap / 聚合设备操作只能在后台队列执行（D11）。
 - 浏览器的声音通常来自子进程（如 `com.google.Chrome.helper`、Safari 的 `com.apple.WebKit.GPU`），指定应用捕获时按 bundle ID 前缀匹配；Safari 请在列表中选择 WebKit 进程或直接用「全部系统音频」。
 
 ## 6. 决策记录
@@ -176,6 +191,11 @@ zimu-ai/
 | D5 | 2026-09-27 | XcodeGen + ZimuCore 本地包 + GitHub Actions macos-26 | 工程文件纯文本易维护；纯逻辑可测试；云端容器无法编译 macOS 代码 |
 | D6 | 2026-09-27 | App target 使用 Swift 5 语言模式（Swift 6.2 编译器），ZimuCore 保持 Swift 6 严格并发 | 云端容器无法本地编译，Swift 6 模式的并发报错只能靠 CI 反复试；且 Swift 6 模式会对音频回调等 C 回调插入运行时隔离断言，容易在音频线程崩溃。平台代码自行保证线程安全（音频类标注 nonisolated / 专用队列） |
 | D7 | 2026-09-27 | `TranscriptionEngine` 协议放在 App 层（依赖 AVAudioPCMBuffer），`TranscriptEvent` 等数据类型放 ZimuCore；`TranslationEngine` 协议放 ZimuCore | 识别引擎输入是 AVFoundation 类型，ZimuCore 保持不依赖 Apple 专有框架 |
+| D15 | 2026-09-27 | `TranscriptEvent.final` 携带语言代码；`TranslationEngine.translate` 增加 `sourceLanguage`，并支持批量翻译 | 多语言识别时翻译需要知道每句的源语言；Apple 翻译批量接口更快 |
+| D14 | 2026-09-27 | 引入第三方依赖 WhisperKit（SPM），模型运行时从 HuggingFace 下载，可配置镜像地址 | 用户要求本地自动识别语言；Apple 识别无语言检测能力 |
+| D13 | 2026-09-27 | 多语言三种方案并存、设置中切换：Apple 多识别器并行 + 置信度切换 / WhisperKit / 云端自动检测 | 用户要求三种都做；各有取舍（离线与延迟、语言覆盖、依赖与算力） |
+| D12 | 2026-09-27 | 翻译提速：对识别中的文字节流实时翻译并在提交时复用；翻译队列支持并发与批量；积压时丢弃最旧 | 用户反馈 Apple 本地翻译跟不上；原方案只在整句定稿后逐句串行翻译 |
+| D11 | 2026-09-27 | Core Audio 的 Tap / 聚合设备创建、启动、停止都放在后台队列执行 | 首次使用时系统授权弹窗会阻塞调用线程，放在主线程会让整个应用卡住（也导致无法退出） |
 | D10 | 2026-09-27 | 发布也可以通过手动触发 CI（`workflow_dispatch` 填 `release_tag`）完成，由 CI 创建标签和 Release | Claude 云端会话只能推送到指定分支，推送标签会被拒绝（HTTP 403）；本地推送 `v*` 标签的方式仍然可用 |
 | D9 | 2026-09-27 | 识别引擎的 prepare / start / stop 统一在 MainActor 上执行，append 可在任意线程 | 避免启动与停止交错时在多个线程读写引擎状态 |
 | D8 | 2026-09-27 | 允许任意 HTTP 地址（`NSAllowsArbitraryLoads`），设置窗口由自己管理的 NSWindow 承载 | 支持局域网 / 本机 Ollama 等 http 服务；菜单栏应用打开 SwiftUI Settings 场景时窗口不易置前 |
@@ -193,3 +213,5 @@ zimu-ai/
 - 2026-09-27 | 7.2–7.4 | App 图标、DMG 打包脚本、CI 产出 DMG / Release、可选签名公证、README 使用说明 | CI 打包步骤 | 7.1 性能测量需真机；Developer ID 需用户提供证书
 - 2026-09-27 | 7.3 | 发布 v1.0.0：合并 PR lingchenfs1/zimu-ai#1 到 main，推送 `v1.0.0` 标签，由 CI 构建 DMG 并创建 GitHub Release（发布说明见 `docs/releases/v1.0.0.md`） | Release 工作流结果与 Release 页面 | 未签名公证；所有「待用户实测」项仍需真机确认
 - 2026-09-27 | 7.3 | PR 已合并（a91a794）；会话推送标签被拒（403），改为给 CI 增加手动发布入口（D10），合并后触发 `release_tag=v1.0.0` | Release 工作流结果与 Release 页面 | 同上
+- 2026-09-27 | 7.3 | v1.0.0 已发布（Release 附 ZimuAI-1.0.0.dmg） | Release 页面 | 无
+- 2026-09-27 | 8.1–8.7 | 实测反馈改进：音频捕获后台启动 + 授权提示；退出前停止捕获 + 兜底退出；实时翻译 + 复用 + 批量 / 并发调度；Apple 多语言并行识别（LanguageSelector）；WhisperKit 引擎（argmax-oss-swift 1.1.0）；识别结果带语言；设置界面四种引擎；版本号 1.1.0 | 本地用 macOS 26.5 SDK 类型检查（含真实 WhisperKit 源码）零错误零警告；ZimuCore 新增单元测试；CI | 全部待用户实测

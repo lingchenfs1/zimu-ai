@@ -57,6 +57,11 @@ final class SubtitleStore {
         now = Date()
     }
 
+    func setLiveTranslation(_ text: String, source: String) {
+        timeline.setLiveTranslation(text, source: source)
+        now = Date()
+    }
+
     func markTranslationSkipped(id: Int) {
         timeline.markTranslationSkipped(id: id)
     }
@@ -108,7 +113,15 @@ final class SubtitleStore {
                 )
             }
         if settings.showLiveText, timeline.isLiveTextVisible(now: now, clearAfter: settings.clearAfterSeconds) {
-            items.append(SubtitleDisplayItem(id: "live", original: timeline.liveText, translation: nil, isLive: true, dimOriginal: true))
+            let liveTranslation = timeline.liveTranslationMatchesLiveText ? timeline.liveTranslation : ""
+            let hasTranslation = mode.showsTranslation && !liveTranslation.isEmpty
+            items.append(SubtitleDisplayItem(
+                id: "live",
+                original: mode.showsOriginal || !hasTranslation ? timeline.liveText : nil,
+                translation: hasTranslation ? liveTranslation : nil,
+                isLive: true,
+                dimOriginal: true
+            ))
         }
         return items
     }

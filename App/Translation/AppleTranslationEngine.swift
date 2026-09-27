@@ -37,6 +37,21 @@ actor AppleTranslationEngine: TranslationEngine {
         _ = try await session(for: source)
     }
 
+    /// 检查多个源语言的语言包，返回缺少语言包或不支持的语言组合
+    func missingPairs(for sources: [String]) async -> [String] {
+        var missing: [String] = []
+        for code in sources where code != "auto" {
+            let source = Locale.Language(identifier: code)
+            if Self.isSameLanguage(source, target) { continue }
+            do {
+                _ = try await session(for: source)
+            } catch {
+                missing.append("\(source.minimalIdentifier) → \(target.minimalIdentifier)")
+            }
+        }
+        return missing
+    }
+
     /// 比较语言和文字（zh-CN 与 zh-Hans 视为相同，zh-Hans 与 zh-Hant 不同）
     static func isSameLanguage(_ lhs: Locale.Language, _ rhs: Locale.Language) -> Bool {
         let a = Locale.Language(identifier: lhs.maximalIdentifier)
@@ -44,24 +59,53 @@ actor AppleTranslationEngine: TranslationEngine {
         return a.languageCode == b.languageCode && a.script == b.script
     }
 
+    nonisolated var maxBatchSize: Int { 8 }
+
     func translate(
         _ text: String,
+        sourceLanguage: String?,
         context: [String],
         onPartial: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> String {
-        let source: Locale.Language
-        if sourceCode == "auto" {
-            guard let detected = NLLanguageRecognizer.dominantLanguage(for: text) else { return text }
-            source = Locale.Language(identifier: detected.rawValue)
-        } else {
-            source = Locale.Language(identifier: sourceCode)
-        }
+        guard let source = resolveSource(for: text, hint: sourceLanguage) else { return text }
         if Self.isSameLanguage(source, target) {
             return text
         }
         let session = try await session(for: source)
         let response = try await session.translate(text)
         return response.targetText
+    }
+
+    /// 一次翻译多句（Apple 翻译的批量接口比逐句调用快）
+    func translateBatch(_ texts: [String], sourceLanguage: String?) async throws -> [String] {
+        guard let first = texts.first, let source = resolveSource(for: first, hint: sourceLanguage) else { return texts }
+        if Self.isSameLanguage(source, target) {
+            return texts
+        }
+        let session = try await session(for: source)
+        let requests = texts.enumerated().map { index, text in
+            TranslationSession.Request(sourceText: text, clientIdentifier: String(index))
+        }
+        let responses = try await session.translations(from: requests)
+        var results = texts
+        for response in responses {
+            if let identifier = response.clientIdentifier, let index = Int(identifier), results.indices.contains(index) {
+                results[index] = response.targetText
+            }
+        }
+        return results
+    }
+
+    /// 源语言：优先用识别结果带的语言，其次用设置中的语言，自动检测时用 NaturalLanguage 判断
+    private func resolveSource(for text: String, hint: String?) -> Locale.Language? {
+        if let hint, hint != "auto" {
+            return Locale.Language(identifier: hint)
+        }
+        if sourceCode != "auto" {
+            return Locale.Language(identifier: sourceCode)
+        }
+        guard let detected = NLLanguageRecognizer.dominantLanguage(for: text) else { return nil }
+        return Locale.Language(identifier: detected.rawValue)
     }
 
     private func session(for source: Locale.Language) async throws -> TranslationSession {

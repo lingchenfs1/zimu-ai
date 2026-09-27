@@ -67,6 +67,7 @@ public enum ServiceError: Error, LocalizedError, Equatable {
     case http(status: Int, message: String)
     case emptyResponse
     case invalidResponse(String)
+    case invalidExtraParameters
 
     public var errorDescription: String? {
         switch self {
@@ -86,6 +87,8 @@ public enum ServiceError: Error, LocalizedError, Equatable {
             return "服务返回了空结果"
         case .invalidResponse(let body):
             return "无法解析服务返回的数据：\(body.prefix(200))"
+        case .invalidExtraParameters:
+            return "「额外请求参数」不是有效的 JSON 对象"
         }
     }
 }

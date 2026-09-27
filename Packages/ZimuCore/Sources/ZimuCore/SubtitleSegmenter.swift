@@ -5,11 +5,14 @@ public struct SubtitleSegment: Sendable, Equatable {
     public var text: String
     public var start: Date
     public var end: Date
+    /// 原文语言（BCP-47，未知为 nil）
+    public var language: String?
 
-    public init(text: String, start: Date, end: Date) {
+    public init(text: String, start: Date, end: Date, language: String? = nil) {
         self.text = text
         self.start = start
         self.end = end
+        self.language = language
     }
 }
 
@@ -26,6 +29,8 @@ public struct SubtitleSegmenter: Sendable {
 
     /// 已定稿但尚未组成完整句子的文本
     public private(set) var pendingText: String = ""
+    /// 缓存文本的语言
+    public private(set) var pendingLanguage: String?
     private var pendingStart: Date?
     private var lastActivity: Date?
 
@@ -47,16 +52,24 @@ public struct SubtitleSegmenter: Sendable {
         lastActivity = date
     }
 
-    /// 追加一段定稿文本，返回其中已完整的句子
-    public mutating func appendFinal(_ text: String, at date: Date) -> [SubtitleSegment] {
+    /// 追加一段定稿文本，返回其中已完整的句子。
+    /// 语言与缓存文本不同时，先把缓存文本单独输出，避免一句字幕里混入两种语言。
+    public mutating func appendFinal(_ text: String, language: String? = nil, at date: Date) -> [SubtitleSegment] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         lastActivity = date
         guard !trimmed.isEmpty else { return [] }
+        var result: [SubtitleSegment] = []
+        if let language, let current = pendingLanguage, current != language, !pendingText.isEmpty {
+            result += flush(now: date)
+        }
         if pendingStart == nil {
             pendingStart = date
         }
+        if language != nil || pendingText.isEmpty {
+            pendingLanguage = language
+        }
         pendingText = TextUtilities.join(pendingText, trimmed)
-        return extractCompleted(at: date)
+        return result + extractCompleted(at: date)
     }
 
     /// 定期调用：长时间无活动或超过最长时长时输出缓存文本
@@ -73,17 +86,20 @@ public struct SubtitleSegmenter: Sendable {
 
     /// 立即输出全部缓存文本
     public mutating func flush(now: Date) -> [SubtitleSegment] {
+        let language = pendingLanguage
         defer {
             pendingText = ""
             pendingStart = nil
+            pendingLanguage = nil
         }
         let text = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !TextUtilities.isOnlyPunctuation(text) else { return [] }
-        return [SubtitleSegment(text: text, start: pendingStart ?? now, end: now)]
+        return [SubtitleSegment(text: text, start: pendingStart ?? now, end: now, language: language)]
     }
 
     public mutating func reset() {
         pendingText = ""
+        pendingLanguage = nil
         pendingStart = nil
         lastActivity = nil
     }
@@ -98,11 +114,14 @@ public struct SubtitleSegmenter: Sendable {
             let sentence = String(pendingText[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
             let rest = String(pendingText[cut...]).trimmingCharacters(in: .whitespacesAndNewlines)
             if !sentence.isEmpty, !TextUtilities.isOnlyPunctuation(sentence) {
-                result.append(SubtitleSegment(text: sentence, start: pendingStart ?? date, end: date))
+                result.append(SubtitleSegment(text: sentence, start: pendingStart ?? date, end: date, language: pendingLanguage))
             }
             pendingText = rest
             pendingStart = rest.isEmpty ? nil : date
-            if rest.isEmpty { break }
+            if rest.isEmpty {
+                pendingLanguage = nil
+                break
+            }
         }
         return result
     }

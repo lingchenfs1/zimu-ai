@@ -28,6 +28,8 @@ final class PipelineController {
     private(set) var warning: String?
     /// 本次运行使用的语言（用于界面显示）
     private(set) var runningDescription: String = ""
+    /// 多语言识别时当前判断的语言
+    private(set) var activeLanguage: String?
 
     @ObservationIgnored private let settingsStore: SettingsStore
     @ObservationIgnored private let apiKeys: APIKeyStore
@@ -45,15 +47,17 @@ final class PipelineController {
     /// 当前接受识别事件的运行编号。停止时要等引擎把剩余结果输出完，所以与 runID 分开
     @ObservationIgnored private var eventRunID = -1
 
-    // 翻译队列
-    @ObservationIgnored private var pendingTranslations: [(id: Int, text: String)] = []
-    @ObservationIgnored private var translationTask: Task<Void, Never>?
-    @ObservationIgnored private var isTranslating = false
-    /// 翻译队列代数：取消后旧任务的收尾不会影响新队列
+    // 翻译（决策 D12）
+    @ObservationIgnored private var scheduler = TranslationScheduler()
+    @ObservationIgnored private var translationTasks: [Task<Void, Never>] = []
+    /// 翻译代数：取消后旧任务的结果不再写入
     @ObservationIgnored private var translationGeneration = 0
     @ObservationIgnored private var contextLines = 3
-    /// 积压超过这个数量时丢弃较早的待翻译句子，保证字幕实时
-    private let maxPendingTranslations = 2
+    @ObservationIgnored private var liveTranslationEnabled = true
+    @ObservationIgnored private var liveTranslationInterval: TimeInterval = 0.5
+    @ObservationIgnored private var liveTranslationTask: Task<Void, Never>?
+    @ObservationIgnored private var liveTranslationDirty = false
+    @ObservationIgnored private var lastLiveTranslation = Date.distantPast
 
     init(settingsStore: SettingsStore, apiKeys: APIKeyStore, subtitles: SubtitleStore) {
         self.settingsStore = settingsStore
@@ -78,6 +82,7 @@ final class PipelineController {
         runID += 1
         let currentRun = runID
         warning = nil
+        activeLanguage = nil
         state = .preparing("正在准备…")
         startTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -107,7 +112,7 @@ final class PipelineController {
 
         state = .preparing("正在准备翻译…")
         translator = try await makeTranslator(settings)
-        contextLines = settings.translationContextLines
+        configureTranslation(settings)
         guard runID == currentRun else { return }
 
         cancelTranslations()
@@ -115,6 +120,13 @@ final class PipelineController {
         partialText = ""
         subtitles.reset()
         subtitles.startSession()
+
+        if let multilingual = engine as? AppleMultilingualSpeechEngine {
+            activeLanguage = multilingual.activeLanguage
+            multilingual.onActiveLanguageChange = { [weak self] language in
+                self?.activeLanguage = language
+            }
+        }
 
         eventRunID = currentRun
         try await engine.start(
@@ -131,15 +143,27 @@ final class PipelineController {
                 }
             }
         )
+        if let multilingual = engine as? AppleMultilingualSpeechEngine {
+            activeLanguage = multilingual.activeLanguage
+        }
         guard runID == currentRun else {
             // 启动过程中用户点了停止：teardown 可能早于 engine.start 完成，这里补一次停止
             await engine.stop()
             return
         }
 
+        // 音频捕获在后台线程启动：第一次使用时系统会弹出授权对话框并阻塞调用线程（决策 D11）
         state = .preparing("正在开始捕获系统音频…")
+        let permissionHint = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, !Task.isCancelled, self.runID == currentRun, case .preparing = self.state else { return }
+            self.state = .preparing("正在等待「录制系统音频」授权。请在系统弹窗中点「允许」；没有看到弹窗时，到 系统设置 › 隐私与安全性 › 屏幕与系统录音 中允许字幕AI")
+        }
+        defer { permissionHint.cancel() }
+
         let capture = SystemAudioCapture()
-        try capture.start(
+        self.capture = capture
+        try await capture.startInBackground(
             bundleID: settings.captureBundleID,
             outputFormat: format,
             onBuffer: { [weak engine] buffer in
@@ -153,7 +177,7 @@ final class PipelineController {
                 }
             }
         )
-        self.capture = capture
+        guard runID == currentRun else { return }
         runningDescription = describe(settings)
         state = .running
         startFlushLoop(runID: currentRun)
@@ -190,6 +214,8 @@ final class PipelineController {
             self.eventRunID = -1
             self.commit(self.segmenter.flush(now: Date()))
             self.partialText = ""
+            self.liveTranslationTask?.cancel()
+            self.liveTranslationTask = nil
             self.subtitles.clearLiveText()
             completion()
         }
@@ -204,8 +230,30 @@ final class PipelineController {
         self.capture = nil
         self.engine = nil
         level = 0
-        capture?.stop()
+        if let capture {
+            await capture.stopInBackground()
+        }
         await engine?.stop()
+    }
+
+    /// 退出应用前调用：尽快停止音频捕获（不等识别引擎输出剩余结果）
+    var needsShutdown: Bool { capture != nil || engine != nil }
+
+    func shutdown(timeout: TimeInterval) async {
+        runID += 1
+        eventRunID = -1
+        startTask?.cancel()
+        flushTask?.cancel()
+        flushTask = nil
+        liveTranslationTask?.cancel()
+        cancelTranslations()
+        let capture = self.capture
+        self.capture = nil
+        self.engine = nil
+        if let capture {
+            await capture.stopInBackground(timeout: timeout)
+        }
+        state = .idle
     }
 
     // MARK: 识别结果
@@ -216,15 +264,16 @@ final class PipelineController {
         case .partial(let text):
             partialText = text
             if !text.isEmpty { segmenter.notePartial(at: now) }
-        case .final(let text):
+        case .final(let text, let language):
             partialText = ""
-            commit(segmenter.appendFinal(text, at: now))
+            commit(segmenter.appendFinal(text, language: language, at: now))
         }
         updateLiveText()
     }
 
     private func updateLiveText() {
         subtitles.setLiveText(TextUtilities.join(segmenter.pendingText, partialText))
+        scheduleLiveTranslation()
     }
 
     private func startFlushLoop(runID currentRun: Int) {
@@ -246,61 +295,144 @@ final class PipelineController {
         for segment in segments {
             let needsTranslation = translator != nil
             let id = subtitles.commit(segment, needsTranslation: needsTranslation)
-            if needsTranslation {
-                enqueueTranslation(id: id, text: segment.text)
+            guard needsTranslation else { continue }
+            // 实时译文恰好对应这句原文时直接复用，省去一次翻译
+            if let reused = subtitles.timeline.reusableLiveTranslation(for: segment.text) {
+                subtitles.updateTranslation(id: id, text: reused, isFinal: true)
+            } else {
+                enqueueTranslation(TranslationJob(id: id, text: segment.text, language: segment.language))
             }
         }
     }
 
-    // MARK: 翻译
+    // MARK: 翻译（决策 D12）
 
-    private func enqueueTranslation(id: Int, text: String) {
-        pendingTranslations.append((id, text))
-        while pendingTranslations.count > maxPendingTranslations {
-            let dropped = pendingTranslations.removeFirst()
+    private func configureTranslation(_ settings: AppSettings) {
+        contextLines = settings.translationContextLines
+        liveTranslationEnabled = settings.liveTranslation
+        let batchSize = translator?.maxBatchSize ?? 1
+        if batchSize > 1 {
+            // 支持批量的引擎（Apple 翻译）：一次一个请求，积压的句子合并成一批
+            scheduler = TranslationScheduler(maxConcurrent: 1, maxQueued: 8, maxBatchSize: batchSize)
+            liveTranslationInterval = 0.4
+        } else {
+            let concurrency = max(1, min(6, settings.translationConcurrency))
+            scheduler = TranslationScheduler(maxConcurrent: concurrency, maxQueued: max(2, concurrency * 2), maxBatchSize: 1)
+            liveTranslationInterval = 1.2
+        }
+    }
+
+    private func enqueueTranslation(_ job: TranslationJob) {
+        for dropped in scheduler.enqueue(job) {
             subtitles.markTranslationSkipped(id: dropped.id)
         }
         pumpTranslations()
     }
 
     private func pumpTranslations() {
-        guard !isTranslating, let translator, !pendingTranslations.isEmpty else { return }
-        let job = pendingTranslations.removeFirst()
-        let context = subtitles.recentOriginals(before: job.id, count: contextLines)
+        guard let translator else { return }
         let generation = translationGeneration
-        isTranslating = true
-        translationTask = Task { @MainActor [weak self] in
-            do {
-                let result = try await translator.translate(job.text, context: context) { partial in
-                    self?.subtitles.updateTranslation(id: job.id, text: partial, isFinal: false)
+        for batch in scheduler.nextBatches() {
+            let task = Task { @MainActor [weak self] in
+                await self?.runTranslation(batch, translator: translator, generation: generation)
+                guard let self, self.translationGeneration == generation else { return }
+                self.scheduler.finishBatch()
+                self.pumpTranslations()
+            }
+            translationTasks.append(task)
+        }
+        translationTasks.removeAll { $0.isCancelled }
+    }
+
+    private func runTranslation(_ batch: [TranslationJob], translator: TranslationEngine, generation: Int) async {
+        do {
+            if batch.count == 1, let job = batch.first {
+                let context = subtitles.recentOriginals(before: job.id, count: contextLines)
+                let result = try await translator.translate(job.text, sourceLanguage: job.language, context: context) { [weak self] partial in
+                    guard let self, self.translationGeneration == generation else { return }
+                    self.subtitles.updateTranslation(id: job.id, text: partial, isFinal: false)
                 }
-                self?.subtitles.updateTranslation(id: job.id, text: result, isFinal: true)
-                if self?.warning?.hasPrefix("翻译") == true { self?.warning = nil }
-            } catch {
-                let cancelled = Task.isCancelled
-                    || error is CancellationError
-                    || (error as? URLError)?.code == .cancelled
-                if cancelled {
-                    self?.subtitles.markTranslationSkipped(id: job.id)
-                } else {
-                    self?.subtitles.markTranslationFailed(id: job.id, message: error.localizedDescription)
-                    if self?.translationGeneration == generation {
-                        self?.warning = "翻译出错：\(error.localizedDescription)"
-                    }
+                guard translationGeneration == generation else { return }
+                subtitles.updateTranslation(id: job.id, text: result, isFinal: true)
+            } else {
+                let results = try await translator.translateBatch(batch.map(\.text), sourceLanguage: batch.first?.language)
+                guard translationGeneration == generation else { return }
+                for (job, text) in zip(batch, results) {
+                    subtitles.updateTranslation(id: job.id, text: text, isFinal: true)
                 }
             }
-            guard let self, self.translationGeneration == generation else { return }
-            self.isTranslating = false
-            self.pumpTranslations()
+            if warning?.hasPrefix("翻译") == true { warning = nil }
+        } catch {
+            let cancelled = Task.isCancelled
+                || error is CancellationError
+                || (error as? URLError)?.code == .cancelled
+            for job in batch {
+                if cancelled {
+                    subtitles.markTranslationSkipped(id: job.id)
+                } else {
+                    subtitles.markTranslationFailed(id: job.id, message: error.localizedDescription)
+                }
+            }
+            if !cancelled, translationGeneration == generation {
+                warning = "翻译出错：\(error.localizedDescription)"
+            }
         }
     }
 
     private func cancelTranslations() {
         translationGeneration += 1
-        translationTask?.cancel()
-        translationTask = nil
-        pendingTranslations.removeAll()
-        isTranslating = false
+        translationTasks.forEach { $0.cancel() }
+        translationTasks.removeAll()
+        scheduler.reset()
+        liveTranslationTask?.cancel()
+        liveTranslationTask = nil
+        liveTranslationDirty = false
+    }
+
+    // MARK: 实时翻译识别中的文字
+
+    private func scheduleLiveTranslation() {
+        guard liveTranslationEnabled, translator != nil, !subtitles.timeline.liveText.isEmpty else { return }
+        guard liveTranslationTask == nil else {
+            liveTranslationDirty = true
+            return
+        }
+        let delay = max(0, liveTranslationInterval - Date().timeIntervalSince(lastLiveTranslation))
+        let generation = translationGeneration
+        liveTranslationTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard let self, !Task.isCancelled, self.translationGeneration == generation else { return }
+            await self.performLiveTranslation(generation: generation)
+            guard self.translationGeneration == generation else { return }
+            self.liveTranslationTask = nil
+            if self.liveTranslationDirty {
+                self.liveTranslationDirty = false
+                self.scheduleLiveTranslation()
+            }
+        }
+    }
+
+    private func performLiveTranslation(generation: Int) async {
+        let source = subtitles.timeline.liveText
+        guard let translator,
+              !source.isEmpty,
+              source != subtitles.timeline.liveTranslationSource,
+              TextUtilities.normalizedForComparison(source).count >= 2
+        else { return }
+        lastLiveTranslation = Date()
+        let language = segmenter.pendingLanguage ?? activeLanguage
+        do {
+            let result = try await translator.translate(source, sourceLanguage: language, context: []) { [weak self] partial in
+                guard let self, self.translationGeneration == generation else { return }
+                self.subtitles.setLiveTranslation(partial, source: source)
+            }
+            guard translationGeneration == generation else { return }
+            subtitles.setLiveTranslation(result, source: source)
+        } catch {
+            // 实时翻译失败不影响整句翻译，忽略
+        }
     }
 
     // MARK: 引擎工厂
@@ -310,11 +442,24 @@ final class PipelineController {
         case .apple:
             guard settings.sourceLanguage != "auto" else { throw TranscriptionError.autoDetectNotSupported }
             return AppleSpeechEngine(localeIdentifier: settings.sourceLanguage)
+        case .appleMultilingual:
+            return AppleMultilingualSpeechEngine(localeIdentifiers: settings.appleCandidateLanguages)
+        case .whisperKit:
+            return SegmentedTranscriptionEngine(
+                transcriber: WhisperKitTranscriber(
+                    model: settings.whisperModel,
+                    endpoint: settings.whisperEndpoint,
+                    language: settings.sourceLanguage
+                ),
+                sensitivity: settings.vadSensitivity
+            )
         case .openAICompatible:
-            return OpenAICompatibleSTTEngine(
-                config: settings.cloudTranscription,
-                apiKey: apiKeys.transcriptionKey,
-                sourceLanguage: settings.sourceLanguage,
+            return SegmentedTranscriptionEngine(
+                transcriber: CloudSegmentTranscriber(
+                    config: settings.cloudTranscription,
+                    apiKey: apiKeys.transcriptionKey,
+                    sourceLanguage: settings.sourceLanguage
+                ),
                 sensitivity: settings.vadSensitivity
             )
         }
@@ -325,24 +470,42 @@ final class PipelineController {
         case .none:
             return nil
         case .apple:
-            let engine = AppleTranslationEngine(source: settings.sourceLanguage, target: settings.targetLanguage)
+            let multilingual = settings.transcriptionEngine == .appleMultilingual
+            let source = multilingual ? "auto" : settings.sourceLanguage
+            let engine = AppleTranslationEngine(source: source, target: settings.targetLanguage)
             try await engine.prepare()
+            if multilingual {
+                let missing = await engine.missingPairs(for: settings.appleCandidateLanguages)
+                if !missing.isEmpty {
+                    warning = "翻译语言包未安装：\(missing.joined(separator: "、"))。请在 设置 › 翻译 中下载"
+                }
+            }
             return engine
         case .openAICompatible:
             _ = try OpenAIEndpoint.url(base: settings.llmTranslation.baseURL, path: OpenAIEndpoint.chatCompletionsPath)
+            _ = try OpenAICompatibleTranslator.parseExtraBody(settings.llmExtraBody)
             return OpenAICompatibleTranslator(
                 config: settings.llmTranslation,
                 apiKey: apiKeys.translationKey,
                 targetLanguage: settings.targetLanguage,
                 temperature: settings.translationTemperature,
                 customInstructions: settings.customTranslationPrompt,
+                extraBodyJSON: settings.llmExtraBody,
                 client: URLSessionHTTPClient()
             )
         }
     }
 
     private func describe(_ settings: AppSettings) -> String {
-        let source = settings.sourceLanguage == "auto" ? "自动" : Locale.current.localizedString(forIdentifier: settings.sourceLanguage) ?? settings.sourceLanguage
+        let source: String
+        switch settings.transcriptionEngine {
+        case .appleMultilingual:
+            source = "多语言"
+        default:
+            source = settings.sourceLanguage == "auto"
+                ? "自动检测"
+                : Locale.current.localizedString(forIdentifier: settings.sourceLanguage) ?? settings.sourceLanguage
+        }
         switch settings.translationEngine {
         case .none:
             return "\(source)（不翻译）"

@@ -4,8 +4,12 @@ import CoreAudio
 
 /// 用 Core Audio Process Tap 捕获系统音频（全部系统音频，或指定应用）。
 /// 需要 Info.plist 中的 NSAudioCaptureUsageDescription，首次使用时系统会请求「录制系统音频」权限。
-final class SystemAudioCapture {
+/// 线程约束：Core Audio 的创建 / 停止在 controlQueue 上，音频回调状态在 queue 上，因此标注为 @unchecked Sendable。
+final class SystemAudioCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "zimu.audio.capture", qos: .userInitiated)
+    /// Core Audio 的创建 / 启动 / 停止放在这个队列上执行：
+    /// 首次使用时系统授权弹窗会阻塞调用线程，不能放在主线程（决策 D11）
+    private static let controlQueue = DispatchQueue(label: "zimu.audio.control", qos: .userInitiated)
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -95,6 +99,48 @@ final class SystemAudioCapture {
         } catch {
             stop()
             throw error
+        }
+    }
+
+    /// 在后台队列上启动（不阻塞主线程）
+    func startInBackground(
+        bundleID: String?,
+        outputFormat: AVAudioFormat?,
+        onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+        onLevel: @escaping (Float) -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            Self.controlQueue.async {
+                do {
+                    try self.start(bundleID: bundleID, outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// 在后台队列上停止；超过 timeout 秒不再等待（返回 false）
+    @discardableResult
+    func stopInBackground(timeout: TimeInterval = 3) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let lock = NSLock()
+            var resumed = false
+            func finish(_ value: Bool) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: value)
+            }
+            Self.controlQueue.async {
+                self.stop()
+                finish(true)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                finish(false)
+            }
         }
     }
 

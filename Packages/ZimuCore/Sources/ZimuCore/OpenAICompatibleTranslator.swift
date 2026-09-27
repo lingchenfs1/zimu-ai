@@ -12,6 +12,8 @@ public struct OpenAICompatibleTranslator: TranslationEngine {
     public var customInstructions: String
     public var stream: Bool
     public var timeout: TimeInterval
+    /// 额外的请求参数（JSON 对象字符串），会合并到请求体中，例如 {"enable_thinking": false}
+    public var extraBodyJSON: String
     private let client: any HTTPClient
 
     public init(
@@ -22,6 +24,7 @@ public struct OpenAICompatibleTranslator: TranslationEngine {
         customInstructions: String = "",
         stream: Bool = true,
         timeout: TimeInterval = 30,
+        extraBodyJSON: String = "",
         client: any HTTPClient
     ) {
         self.config = config
@@ -31,10 +34,21 @@ public struct OpenAICompatibleTranslator: TranslationEngine {
         self.customInstructions = customInstructions
         self.stream = stream
         self.timeout = timeout
+        self.extraBodyJSON = extraBodyJSON
         self.client = client
     }
 
-    public func makeRequest(text: String, context: [String]) throws -> URLRequest {
+    /// 解析额外请求参数；为空返回空字典，格式错误时抛出
+    public static func parseExtraBody(_ json: String) throws -> [String: Any] {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [:] }
+        guard let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw ServiceError.invalidExtraParameters }
+        return object
+    }
+
+    public func makeRequest(text: String, context: [String], sourceLanguage: String? = nil) throws -> URLRequest {
         let model = config.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw ServiceError.missingModel }
         let url = try OpenAIEndpoint.url(base: config.baseURL, path: OpenAIEndpoint.chatCompletionsPath)
@@ -44,25 +58,29 @@ public struct OpenAICompatibleTranslator: TranslationEngine {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(stream ? "text/event-stream" : "application/json", forHTTPHeaderField: "Accept")
         OpenAIEndpoint.authorize(&request, apiKey: apiKey)
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "stream": stream,
             "temperature": temperature,
             "messages": [
                 ["role": "system", "content": TranslationPrompt.systemPrompt(targetLanguage: targetLanguage, customInstructions: customInstructions)],
-                ["role": "user", "content": TranslationPrompt.userMessage(text: text, context: context)],
+                ["role": "user", "content": TranslationPrompt.userMessage(text: text, context: context, sourceLanguage: sourceLanguage)],
             ],
         ]
+        for (key, value) in try Self.parseExtraBody(extraBodyJSON) where key != "messages" {
+            body[key] = value
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
 
     public func translate(
         _ text: String,
+        sourceLanguage: String?,
         context: [String],
         onPartial: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> String {
-        let request = try makeRequest(text: text, context: context)
+        let request = try makeRequest(text: text, context: context, sourceLanguage: sourceLanguage)
         var response: HTTPResponseInfo?
         var accumulated = ""
         var otherLines: [String] = []
