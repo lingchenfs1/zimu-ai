@@ -2,8 +2,8 @@ import XCTest
 @testable import ZimuCore
 
 final class TranslationSchedulerTests: XCTestCase {
-    func job(_ id: Int, _ language: String? = "en") -> TranslationJob {
-        TranslationJob(id: id, text: "line \(id)", language: language)
+    func job(_ id: Int, _ language: String? = "en", target: String = "zh-Hans") -> TranslationJob {
+        TranslationJob(id: id, text: "line \(id)", language: language, target: target)
     }
 
     func testConcurrencyLimit() {
@@ -12,7 +12,7 @@ final class TranslationSchedulerTests: XCTestCase {
         let first = scheduler.nextBatches()
         XCTAssertEqual(first.map { $0.map(\.id) }, [[1], [2]])
         XCTAssertEqual(scheduler.nextBatches().count, 0)
-        scheduler.finishBatch()
+        scheduler.finishBatch(target: "zh-Hans")
         XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[3]])
     }
 
@@ -23,9 +23,9 @@ final class TranslationSchedulerTests: XCTestCase {
         scheduler.enqueue(job(3, "ja"))
         scheduler.enqueue(job(4, "en"))
         XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[1, 2]])
-        scheduler.finishBatch()
+        scheduler.finishBatch(target: "zh-Hans")
         XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[3]])
-        scheduler.finishBatch()
+        scheduler.finishBatch(target: "zh-Hans")
         XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[4]])
     }
 
@@ -42,6 +42,38 @@ final class TranslationSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.enqueue(job(2)), [])
         XCTAssertEqual(scheduler.enqueue(job(3)).map(\.id), [1])
         XCTAssertEqual(scheduler.queued.map(\.id), [2, 3])
+    }
+
+    func testBatchesPerTargetWithPerTargetConcurrency() {
+        // 批量引擎：每种目标语言一次一个请求，不同目标语言可以同时进行
+        var scheduler = TranslationScheduler(maxConcurrent: 2, maxConcurrentPerTarget: 1, maxQueued: 20, maxBatchSize: 4)
+        for i in 1...3 {
+            scheduler.enqueue(job(i, target: "zh-Hans"))
+            scheduler.enqueue(job(i, target: "ja"))
+        }
+        let batches = scheduler.nextBatches()
+        XCTAssertEqual(batches.map { $0.map(\.id) }, [[1, 2, 3], [1, 2, 3]])
+        XCTAssertEqual(batches.map { $0.first?.target }, ["zh-Hans", "ja"])
+        XCTAssertTrue(batches.allSatisfy { batch in batch.allSatisfy { $0.target == batch.first?.target } })
+
+        scheduler.enqueue(job(4, target: "zh-Hans"))
+        scheduler.enqueue(job(4, target: "ja"))
+        XCTAssertTrue(scheduler.nextBatches().isEmpty)
+        scheduler.finishBatch(target: "ja")
+        let next = scheduler.nextBatches()
+        XCTAssertEqual(next.map { $0.map(\.id) }, [[4]])
+        XCTAssertEqual(next.first?.first?.target, "ja")
+        XCTAssertEqual(scheduler.queued.map(\.target), ["zh-Hans"])
+    }
+
+    func testBatchKeepsOrderWithinTarget() {
+        var scheduler = TranslationScheduler(maxConcurrent: 1, maxQueued: 20, maxBatchSize: 4)
+        scheduler.enqueue(job(1, "en", target: "zh-Hans"))
+        scheduler.enqueue(job(1, "en", target: "ja"))
+        scheduler.enqueue(job(2, "fr", target: "zh-Hans"))
+        scheduler.enqueue(job(3, "en", target: "zh-Hans"))
+        // 同一目标语言遇到不同原文语言就停止，不能跳过 2 把 3 合并进来
+        XCTAssertEqual(scheduler.nextBatches().map { $0.map(\.id) }, [[1]])
     }
 }
 
@@ -106,31 +138,45 @@ final class LiveTranslationTests: XCTestCase {
     func testLiveTranslationMatchesGrowingText() {
         var timeline = SubtitleTimeline()
         timeline.setLiveText("Hello my name", at: t0)
-        timeline.setLiveTranslation("你好，我的名字", source: "Hello my name")
+        timeline.setLiveTranslation("你好，我的名字", source: "Hello my name", target: "zh-Hans")
         timeline.setLiveText("Hello, my name is John", at: t0)
-        XCTAssertTrue(timeline.liveTranslationMatchesLiveText)
+        XCTAssertEqual(timeline.liveTranslation(for: "zh-Hans"), "你好，我的名字")
+        XCTAssertNil(timeline.liveTranslation(for: "ja"))
         timeline.setLiveText("and then", at: t0)
-        XCTAssertFalse(timeline.liveTranslationMatchesLiveText)
+        XCTAssertNil(timeline.liveTranslation(for: "zh-Hans"))
     }
 
     func testReuseForCommittedSentence() {
         var timeline = SubtitleTimeline()
-        timeline.setLiveTranslation("你好。", source: "Hello")
-        XCTAssertEqual(timeline.reusableLiveTranslation(for: "Hello."), "你好。")
-        XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello there."))
+        timeline.setLiveTranslation("你好。", source: "Hello", target: "zh-Hans")
+        XCTAssertEqual(timeline.reusableLiveTranslation(for: "Hello.", target: "zh-Hans"), "你好。")
+        XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello there.", target: "zh-Hans"))
+        XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello.", target: "ja"))
     }
 
     func testStreamingLiveTranslationIsNotReused() {
         var timeline = SubtitleTimeline()
-        timeline.setLiveTranslation("你", source: "Hello", isComplete: false)
-        XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello"))
-        timeline.setLiveTranslation("你好", source: "Hello", isComplete: true)
-        XCTAssertEqual(timeline.reusableLiveTranslation(for: "Hello"), "你好")
+        timeline.setLiveTranslation("你", source: "Hello", target: "zh-Hans", isComplete: false)
+        XCTAssertNil(timeline.reusableLiveTranslation(for: "Hello", target: "zh-Hans"))
+        timeline.setLiveTranslation("你好", source: "Hello", target: "zh-Hans", isComplete: true)
+        XCTAssertEqual(timeline.reusableLiveTranslation(for: "Hello", target: "zh-Hans"), "你好")
+    }
+
+    func testLiveTranslationsPerTarget() {
+        var timeline = SubtitleTimeline()
+        timeline.setLiveText("Hello my", at: t0)
+        timeline.setLiveTranslation("你好我的", source: "Hello my", target: "zh-Hans")
+        timeline.setLiveTranslation("こんにちは", source: "Hello", target: "ja")
+        XCTAssertEqual(timeline.liveTranslation(for: "zh-Hans"), "你好我的")
+        XCTAssertEqual(timeline.liveTranslation(for: "ja"), "こんにちは")
+        XCTAssertEqual(timeline.liveTranslationSource(for: "ja"), "Hello")
+        timeline.clearLiveText()
+        XCTAssertTrue(timeline.liveTranslations.isEmpty)
     }
 
     func testCommitKeepsLanguage() {
         var timeline = SubtitleTimeline()
-        let id = timeline.commit(SubtitleSegment(text: "Hola.", start: t0, end: t0, language: "es-ES"), needsTranslation: true, at: t0)
+        let id = timeline.commit(SubtitleSegment(text: "Hola.", start: t0, end: t0, language: "es-ES"), targets: ["zh-Hans"], at: t0)
         XCTAssertEqual(timeline.entry(id: id)?.language, "es-ES")
         XCTAssertEqual(timeline.latestID, id)
     }

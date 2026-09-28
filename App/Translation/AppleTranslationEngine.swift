@@ -177,6 +177,8 @@ actor AppleTranslationEngine: TranslationEngine {
 struct AppleTranslationStatusView: View {
     let source: String
     let target: String
+    /// 同时检查多种目标语言时，在状态前显示目标语言名
+    var showsTarget = false
 
     @State private var statusText = "正在检查…"
     @State private var canDownload = false
@@ -186,6 +188,10 @@ struct AppleTranslationStatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
+                if showsTarget {
+                    Text("→ \(Languages.displayName(for: target))")
+                        .font(.callout.weight(.medium))
+                }
                 Text(statusText)
                     .font(.callout)
                 Spacer()

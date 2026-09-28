@@ -44,10 +44,15 @@ struct SubtitleOverlayView: View {
     }
 }
 
-/// 一条字幕：译文在上（大字），原文在下（小字），与常见双语字幕一致
+/// 一条字幕：译文在上（大字），同时翻译成的其他语言居中（中号字），原文在下（小字），与常见双语字幕一致
 private struct SubtitleItemView: View {
     let item: SubtitleDisplayItem
     let settings: AppSettings
+
+    /// 其他语言译文的字号：介于原文和主译文之间
+    private var additionalFontSize: Double {
+        max(settings.originalFontSize, (settings.translationFontSize + settings.originalFontSize) / 2)
+    }
 
     var body: some View {
         VStack(spacing: 2) {
@@ -56,6 +61,13 @@ private struct SubtitleItemView: View {
                     .font(.system(size: settings.translationFontSize, weight: settings.boldText ? .semibold : .regular))
                     .foregroundStyle(Color(hex: settings.translationColorHex, fallback: .yellow).opacity(item.isLive ? 0.85 : 1))
                     .lineLimit(item.isLive ? 2 : 3)
+                    .truncationMode(item.isLive ? .head : .tail)
+            }
+            ForEach(Array(item.additionalTranslations.enumerated()), id: \.offset) { _, translation in
+                Text(translation)
+                    .font(.system(size: additionalFontSize, weight: settings.boldText ? .medium : .regular))
+                    .foregroundStyle(Color(hex: settings.translationColorHex, fallback: .yellow).opacity(item.isLive ? 0.75 : 0.9))
+                    .lineLimit(2)
                     .truncationMode(item.isLive ? .head : .tail)
             }
             if let original = item.original {
@@ -90,7 +102,7 @@ private struct UnlockedChrome: View {
 
             VStack {
                 HStack(alignment: .top) {
-                    Label("拖动移动 · 右下角调整大小", systemImage: "hand.draw")
+                    Label("拖动移动 · 拖边缘或四角调整大小", systemImage: "hand.draw")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.white.opacity(0.9))
                         .padding(.horizontal, 8)
@@ -117,31 +129,24 @@ private struct UnlockedChrome: View {
                         .foregroundStyle(.white.opacity(0.75))
                     Spacer()
                 }
-                HStack {
-                    Spacer()
-                    ResizeGrip(controller: controller)
-                }
             }
             .padding(8)
+        }
+        // 只是提示图标；真正的缩放由盖在窗口四边四角上的 AppKit 手柄处理（OverlayContainerView）
+        .overlay(alignment: .bottomTrailing) {
+            ResizeGripIcon()
+                .padding(3)
         }
     }
 }
 
-private struct ResizeGrip: View {
-    let controller: OverlayController
-
+private struct ResizeGripIcon: View {
     var body: some View {
         Image(systemName: "arrow.up.left.and.arrow.down.right")
-            .font(.system(size: 11, weight: .bold))
+            .font(.system(size: 9, weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 22, height: 22)
+            .frame(width: 18, height: 18)
             .background(Circle().fill(Color.black.opacity(0.55)))
-            .contentShape(Rectangle())
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { _ in controller.resizeChanged() }
-                    .onEnded { _ in controller.resizeEnded() }
-            )
-            .help("拖动调整字幕窗大小")
+            .allowsHitTesting(false)
     }
 }

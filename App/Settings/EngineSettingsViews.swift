@@ -255,11 +255,20 @@ struct TranslationSettingsView: View {
                         Text(language.name).tag(language.code)
                     }
                 }
+                .onChange(of: store.settings.targetLanguage) { _, primary in
+                    // 主目标语言不再出现在「同时翻译成」里
+                    store.settings.additionalTargetLanguages.removeAll { $0 == primary }
+                }
                 if store.settings.translationEngine != .none {
+                    AdditionalTargetsPicker(
+                        primary: store.settings.targetLanguage,
+                        selection: $store.settings.additionalTargetLanguages,
+                        maximum: AppSettings.maximumAdditionalTargets
+                    )
                     Toggle("实时翻译识别中的文字", isOn: $store.settings.liveTranslation)
                     Text(store.settings.translationEngine == .apple
                          ? "一句话还没说完就开始翻译，译文基本与原文同步（Apple 本地翻译免费，建议开启）。"
-                         : "一句话还没说完就开始翻译，译文更及时，但会明显增加 API 调用次数和费用。")
+                         : "一句话还没说完就开始翻译，译文更及时，但会明显增加 API 调用次数和费用（同时翻译成多种语言时按语言数倍增）。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -273,13 +282,17 @@ struct TranslationSettingsView: View {
                 }
             case .apple:
                 Section("Apple 本地翻译") {
-                    Text("使用系统自带的离线翻译，免费且不联网。需要先下载对应的语言包。")
+                    Text("使用系统自带的离线翻译，免费且不联网。需要先下载对应的语言包；同时翻译成多种语言时，每种语言都需要语言包。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                    AppleTranslationStatusView(
-                        source: store.settings.sourceLanguage,
-                        target: store.settings.targetLanguage
-                    )
+                    let targets = store.settings.translationTargets
+                    ForEach(targets, id: \.self) { target in
+                        AppleTranslationStatusView(
+                            source: store.settings.sourceLanguage,
+                            target: target,
+                            showsTarget: targets.count > 1
+                        )
+                    }
                     TestButton(title: "测试翻译", isTesting: isTesting, result: testResult) {
                         testTranslation()
                     }
@@ -318,39 +331,94 @@ struct TranslationSettingsView: View {
         .formStyle(.grouped)
     }
 
+    /// 把一句英文翻译成每种目标语言
     private func testTranslation() {
         let settings = model.settingsStore.settings
+        guard settings.translationEngine != .none else { return }
         isTesting = true
         testResult = nil
         let sample = "Hello! This is a quick test of the subtitle translator."
+        let targets = settings.translationTargets
         Task { @MainActor in
+            var lines: [String] = []
             do {
-                let engine: TranslationEngine
-                switch settings.translationEngine {
-                case .none:
-                    isTesting = false
-                    return
-                case .apple:
-                    let apple = AppleTranslationEngine(source: "en", target: settings.targetLanguage)
-                    try await apple.prepare()
-                    engine = apple
-                case .openAICompatible:
-                    engine = OpenAICompatibleTranslator(
-                        config: settings.llmTranslation,
-                        apiKey: model.apiKeys.translationKey,
-                        targetLanguage: settings.targetLanguage,
-                        temperature: settings.translationTemperature,
-                        customInstructions: settings.customTranslationPrompt,
-                        client: URLSessionHTTPClient()
-                    )
+                for target in targets {
+                    let engine: TranslationEngine
+                    switch settings.translationEngine {
+                    case .none:
+                        continue
+                    case .apple:
+                        let apple = AppleTranslationEngine(source: "en", target: target)
+                        try await apple.prepare()
+                        engine = apple
+                    case .openAICompatible:
+                        engine = OpenAICompatibleTranslator(
+                            config: settings.llmTranslation,
+                            apiKey: model.apiKeys.translationKey,
+                            targetLanguage: target,
+                            temperature: settings.translationTemperature,
+                            customInstructions: settings.customTranslationPrompt,
+                            extraBodyJSON: settings.llmExtraBody,
+                            client: URLSessionHTTPClient()
+                        )
+                    }
+                    let result = try await engine.translate(sample, context: []) { _ in }
+                    lines.append(targets.count > 1 ? "\(Languages.displayName(for: target))：\(result)" : result)
                 }
-                let result = try await engine.translate(sample, context: []) { _ in }
-                testResult = .success(result)
+                testResult = .success(lines.joined(separator: "\n"))
             } catch {
-                testResult = .failure(error.localizedDescription)
+                let done = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+                testResult = .failure(done + error.localizedDescription)
             }
             isTesting = false
         }
+    }
+}
+
+/// 「同时翻译成」：主目标语言之外再选几种语言（决策 D17）
+struct AdditionalTargetsPicker: View {
+    let primary: String
+    @Binding var selection: [String]
+    let maximum: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("同时翻译成（可选，最多 \(maximum) 种）")
+                Spacer()
+                if !selection.isEmpty {
+                    Button("清除") { selection.removeAll() }
+                        .controlSize(.small)
+                }
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), alignment: .leading)], alignment: .leading, spacing: 4) {
+                ForEach(Languages.targets.filter { $0.code != primary }) { language in
+                    Toggle(isOn: binding(for: language.code)) {
+                        Text(language.name).lineLimit(1)
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(!selection.contains(language.code) && selection.count >= maximum)
+                }
+            }
+            Text("每句字幕会分别翻译成这些语言，显示在主译文下方；导出的 SRT 也会包含全部译文。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func binding(for code: String) -> Binding<Bool> {
+        Binding(
+            get: { selection.contains(code) },
+            set: { isOn in
+                if isOn {
+                    if !selection.contains(code), selection.count < maximum {
+                        selection.append(code)
+                    }
+                } else {
+                    selection.removeAll { $0 == code }
+                }
+            }
+        )
     }
 }
 
