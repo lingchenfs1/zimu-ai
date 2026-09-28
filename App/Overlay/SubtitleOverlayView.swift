@@ -130,7 +130,9 @@ private struct UnlockedChrome: View {
                     Spacer()
                 }
             }
-            .padding(8)
+            // 避开四角的缩放手柄（OverlayContainerView.cornerSize = 22），否则「锁定」按钮的一部分点不到
+            .padding(.horizontal, 26)
+            .padding(.vertical, 10)
         }
         // 只是提示图标；真正的缩放由盖在窗口四边四角上的 AppKit 手柄处理（OverlayContainerView）
         .overlay(alignment: .bottomTrailing) {
