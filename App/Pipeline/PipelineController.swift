@@ -30,6 +30,8 @@ final class PipelineController {
     private(set) var runningDescription: String = ""
     /// 多语言识别时当前判断的语言
     private(set) var activeLanguage: String?
+    /// 准备阶段（下载 / 加载模型）的进度 0...1；nil 表示进度未知
+    private(set) var preparationProgress: Double?
 
     @ObservationIgnored private let settingsStore: SettingsStore
     @ObservationIgnored private let apiKeys: APIKeyStore
@@ -87,6 +89,7 @@ final class PipelineController {
         warning = nil
         warningIsTranslationError = false
         activeLanguage = nil
+        preparationProgress = nil
         state = .preparing("正在准备…")
         startTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -97,6 +100,7 @@ final class PipelineController {
                 self.eventRunID = -1
                 await self.teardown()
                 guard self.runID == currentRun else { return }
+                self.preparationProgress = nil
                 self.state = .failed(error.localizedDescription)
             }
         }
@@ -107,11 +111,13 @@ final class PipelineController {
         let engine = try makeTranscriptionEngine(settings)
         self.engine = engine
 
-        let format = try await engine.prepare { [weak self] message in
+        let format = try await engine.prepare { [weak self] status in
             // 下载进度回调可能晚到：只在仍处于准备阶段时更新
             guard let self, self.runID == currentRun, case .preparing = self.state else { return }
-            self.state = .preparing(message)
+            self.state = .preparing(status.message)
+            self.preparationProgress = status.fraction
         }
+        preparationProgress = nil
         try Task.checkCancellation()
         guard runID == currentRun else { return }
 

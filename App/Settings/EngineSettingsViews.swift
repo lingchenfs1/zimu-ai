@@ -8,6 +8,7 @@ struct TranscriptionSettingsView: View {
     @State private var isTesting = false
     @State private var modelStatus: String?
     @State private var isDownloading = false
+    @State private var preparation: PreparationStatus?
     @State private var supportedLocales: [Locale] = []
 
     var body: some View {
@@ -39,7 +40,7 @@ struct TranscriptionSettingsView: View {
                     }
                     modelDownloadRow {
                         let engine = AppleSpeechEngine(localeIdentifier: store.settings.sourceLanguage)
-                        _ = try await engine.prepare { message in modelStatus = message }
+                        _ = try await engine.prepare { status in preparation = status }
                     }
                 }
             case .appleMultilingual:
@@ -54,7 +55,7 @@ struct TranscriptionSettingsView: View {
                     )
                     modelDownloadRow {
                         let engine = AppleMultilingualSpeechEngine(localeIdentifiers: store.settings.appleCandidateLanguages)
-                        _ = try await engine.prepare { message in modelStatus = message }
+                        _ = try await engine.prepare { status in preparation = status }
                     }
                 }
             case .whisperKit:
@@ -86,7 +87,7 @@ struct TranscriptionSettingsView: View {
                             endpoint: store.settings.whisperEndpoint,
                             language: store.settings.sourceLanguage
                         )
-                        try await transcriber.prepare { message in modelStatus = message }
+                        try await transcriber.prepare { status in preparation = status }
                     }
                 }
             case .openAICompatible:
@@ -113,29 +114,36 @@ struct TranscriptionSettingsView: View {
         }
     }
 
-    /// 「检查 / 下载模型」按钮和状态
+    /// 「检查 / 下载模型」按钮、进度条和结果
     @ViewBuilder
     private func modelDownloadRow(title: String = "检查 / 下载语言模型", action: @escaping @MainActor () async throws -> Void) -> some View {
-        HStack {
-            Button(isDownloading ? "正在准备…" : title) {
-                isDownloading = true
-                modelStatus = nil
-                Task { @MainActor in
-                    do {
-                        try await action()
-                        modelStatus = "✅ 模型已就绪"
-                    } catch {
-                        modelStatus = "❌ \(error.localizedDescription)"
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button(isDownloading ? "正在准备…" : title) {
+                    isDownloading = true
+                    modelStatus = nil
+                    preparation = PreparationStatus("正在检查模型…")
+                    Task { @MainActor in
+                        do {
+                            try await action()
+                            modelStatus = "✅ 模型已就绪"
+                        } catch {
+                            modelStatus = "❌ \(error.localizedDescription)"
+                        }
+                        isDownloading = false
+                        preparation = nil
                     }
-                    isDownloading = false
+                }
+                .disabled(isDownloading)
+                if let modelStatus {
+                    Text(modelStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .disabled(isDownloading)
-            if let modelStatus {
-                Text(modelStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            if isDownloading {
+                PreparationProgressView(status: preparation)
             }
         }
     }
@@ -379,6 +387,31 @@ struct ShortcutsSettingsView: View {
 }
 
 // MARK: - 小组件
+
+/// 下载 / 准备进度条：已知进度时显示百分比，未知时显示不确定进度条
+struct PreparationProgressView: View {
+    let status: PreparationStatus?
+
+    var body: some View {
+        let message = status?.message ?? "正在准备…"
+        if let fraction = status?.fraction {
+            ProgressView(value: fraction) {
+                Text(message).font(.caption)
+            } currentValueLabel: {
+                Text("\(Int((fraction * 100).rounded()))%")
+                    .font(.caption)
+                    .monospacedDigit()
+            }
+        } else {
+            ProgressView {
+                Text(message)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .progressViewStyle(.linear)
+        }
+    }
+}
 
 enum TestResult: Equatable {
     case success(String)

@@ -4,7 +4,7 @@ import ZimuCore
 /// 把一段语音（16kHz 单声道 Float）转写成文字的后端：云端接口或本地 WhisperKit
 protocol SegmentTranscriber: AnyObject {
     /// 准备（检查配置、下载 / 加载模型等）
-    @MainActor func prepare(status: @escaping @MainActor (String) -> Void) async throws
+    @MainActor func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws
     /// 转写一段语音
     /// - Parameter prompt: 前文，帮助识别专有名词（不支持时忽略）
     func transcribe(samples: [Float], prompt: String?) async throws -> (text: String, language: String?)
@@ -39,7 +39,7 @@ final class SegmentedTranscriptionEngine: TranscriptionEngine {
     }
 
     @MainActor
-    func prepare(status: @escaping @MainActor (String) -> Void) async throws -> AVAudioFormat {
+    func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws -> AVAudioFormat {
         try await transcriber.prepare(status: status)
         return format
     }
@@ -233,7 +233,7 @@ final class CloudSegmentTranscriber: SegmentTranscriber {
     var supportsInterimResults: Bool { false }
 
     @MainActor
-    func prepare(status: @escaping @MainActor (String) -> Void) async throws {
+    func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws {
         _ = try OpenAIEndpoint.url(base: client.config.baseURL, path: OpenAIEndpoint.transcriptionsPath)
         if client.config.model.trimmingCharacters(in: .whitespaces).isEmpty {
             throw ServiceError.missingModel

@@ -1,10 +1,22 @@
 import AVFoundation
 import ZimuCore
 
+/// 引擎准备（下载 / 加载模型）的进度
+struct PreparationStatus: Equatable {
+    var message: String
+    /// 0...1；nil 表示进度未知（显示不确定进度条）
+    var fraction: Double?
+
+    init(_ message: String, fraction: Double? = nil) {
+        self.message = message
+        self.fraction = fraction.map { max(0, min(1, $0)) }
+    }
+}
+
 /// 语音识别引擎抽象（放在 App 层，因为输入是 AVAudioPCMBuffer，见决策 D7）
 protocol TranscriptionEngine: AnyObject {
     /// 准备引擎（检查语言、下载模型等），返回需要的输入音频格式
-    @MainActor func prepare(status: @escaping @MainActor (String) -> Void) async throws -> AVAudioFormat
+    @MainActor func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws -> AVAudioFormat
 
     /// 开始识别。事件和错误都在主线程按顺序回调；isFatal 为 true 表示识别已中断、不会再有结果。
     @MainActor func start(

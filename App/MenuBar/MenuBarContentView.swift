@@ -52,9 +52,7 @@ struct MenuBarContentView: View {
                 }
                 switch pipeline.state {
                 case .preparing(let message):
-                    Label(message, systemImage: "hourglass")
-                        .font(.caption)
-                        .fixedSize(horizontal: false, vertical: true)
+                    PreparationProgressView(status: PreparationStatus(message, fraction: pipeline.preparationProgress))
                 case .failed(let message):
                     Text(message)
                         .font(.caption)

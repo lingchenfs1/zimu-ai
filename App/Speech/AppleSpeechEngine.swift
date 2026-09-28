@@ -16,7 +16,7 @@ final class AppleSpeechEngine: TranscriptionEngine {
     }
 
     @MainActor
-    func prepare(status: @escaping @MainActor (String) -> Void) async throws -> AVAudioFormat {
+    func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws -> AVAudioFormat {
         guard localeIdentifier != "auto" else {
             throw TranscriptionError.autoDetectNotSupported
         }
@@ -125,7 +125,7 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
     }
 
     @MainActor
-    func prepare(status: @escaping @MainActor (String) -> Void) async throws -> AVAudioFormat {
+    func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws -> AVAudioFormat {
         guard SpeechTranscriber.isAvailable else { throw TranscriptionError.unavailable }
         guard localeIdentifiers.count >= 2 else {
             throw TranscriptionError.missingConfiguration("多语言识别至少需要选择 2 种候选语言（设置 › 识别）")
@@ -302,13 +302,13 @@ final class AnalyzerInputStream {
 enum SpeechAssets {
     /// 确保模型已安装；下载时显示进度
     @MainActor
-    static func ensureInstalled(_ modules: [SpeechTranscriber], status: @escaping @MainActor (String) -> Void) async throws {
+    static func ensureInstalled(_ modules: [SpeechTranscriber], status: @escaping @MainActor (PreparationStatus) -> Void) async throws {
         guard let request = try await AssetInventory.assetInstallationRequest(supporting: modules) else { return }
         let progress = request.progress
         let monitor = Task { @MainActor in
             while !Task.isCancelled {
-                status("正在下载语音识别模型… \(Int(progress.fractionCompleted * 100))%")
-                try? await Task.sleep(for: .milliseconds(500))
+                status(PreparationStatus("正在下载语音识别模型…", fraction: progress.fractionCompleted))
+                try? await Task.sleep(for: .milliseconds(300))
             }
         }
         defer { monitor.cancel() }

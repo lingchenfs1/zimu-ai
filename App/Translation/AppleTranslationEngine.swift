@@ -180,24 +180,37 @@ struct AppleTranslationStatusView: View {
 
     @State private var statusText = "正在检查…"
     @State private var canDownload = false
+    @State private var isDownloading = false
     @State private var configuration: TranslationSession.Configuration?
 
     var body: some View {
-        HStack {
-            Text(statusText)
-                .font(.callout)
-            Spacer()
-            Button("下载语言包") {
-                if configuration == nil {
-                    configuration = TranslationSession.Configuration(
-                        source: source == "auto" ? nil : Locale.Language(identifier: source),
-                        target: Locale.Language(identifier: target)
-                    )
-                } else {
-                    configuration?.invalidate()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(statusText)
+                    .font(.callout)
+                Spacer()
+                Button(isDownloading ? "正在下载…" : "下载语言包") {
+                    isDownloading = true
+                    if configuration == nil {
+                        configuration = TranslationSession.Configuration(
+                            source: source == "auto" ? nil : Locale.Language(identifier: source),
+                            target: Locale.Language(identifier: target)
+                        )
+                    } else {
+                        configuration?.invalidate()
+                    }
                 }
+                .disabled(!canDownload || isDownloading)
             }
-            .disabled(!canDownload)
+            if isDownloading {
+                // 语言包由系统下载，系统不提供具体进度，这里显示进行中
+                ProgressView {
+                    Text("正在下载语言包，请在系统弹窗中确认；完成后会自动更新状态")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .progressViewStyle(.linear)
+            }
         }
         .translationTask(configuration) { session in
             do {
@@ -205,10 +218,12 @@ struct AppleTranslationStatusView: View {
             } catch {
                 statusText = "❌ \(error.localizedDescription)"
             }
+            isDownloading = false
             await refresh()
         }
         .task(id: "\(source)->\(target)") {
             configuration = nil
+            isDownloading = false
             await refresh()
         }
     }

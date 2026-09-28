@@ -40,7 +40,7 @@ final class WhisperKitTranscriber: SegmentTranscriber {
     var supportsInterimResults: Bool { true }
 
     @MainActor
-    func prepare(status: @escaping @MainActor (String) -> Void) async throws {
+    func prepare(status: @escaping @MainActor (PreparationStatus) -> Void) async throws {
         try await Self.runner.load(model: model, endpoint: endpoint, status: status)
     }
 
@@ -87,7 +87,7 @@ actor WhisperKitRunner {
     /// 最后一次请求的模型；较早的请求完成时不会覆盖它
     private var requestedModel: String?
 
-    func load(model: String, endpoint: String, status: @escaping @MainActor (String) -> Void) async throws {
+    func load(model: String, endpoint: String, status: @escaping @MainActor (PreparationStatus) -> Void) async throws {
         requestedModel = model
         if pipe != nil, loadedModel == model { return }
         let task: Task<WhisperKitBox, Error>
@@ -112,7 +112,7 @@ actor WhisperKitRunner {
         }
     }
 
-    private static func makePipe(model: String, endpoint: String, status: @escaping @MainActor (String) -> Void) async throws -> WhisperKit {
+    private static func makePipe(model: String, endpoint: String, status: @escaping @MainActor (PreparationStatus) -> Void) async throws -> WhisperKit {
         let base = WhisperKitTranscriber.modelsDirectory
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         var remote = endpoint.isEmpty ? Self.defaultEndpoint : endpoint
@@ -124,7 +124,7 @@ actor WhisperKitRunner {
             setenv("HF_ENDPOINT", remote, 1)
         }
 
-        await status("正在准备 Whisper 模型…")
+        await status(PreparationStatus("正在准备 Whisper 模型…"))
         let folder: URL
         if WhisperKitTranscriber.isModelDownloaded(model) {
             // 已完整下载：直接使用本地模型（WhisperKit.download 每次都会联网检查，离线时会失败）
@@ -137,16 +137,16 @@ actor WhisperKitRunner {
                 from: "argmaxinc/whisperkit-coreml",
                 endpoint: remote
             ) { progress in
-                let percent = Int(progress.fractionCompleted * 100)
+                let fraction = progress.fractionCompleted
                 Task { @MainActor in
-                    status("正在下载 Whisper 模型… \(percent)%")
+                    status(PreparationStatus("正在下载 Whisper 模型…", fraction: fraction))
                 }
             }
             // v1.1.0 中取消下载不会抛错，这里自己检查
             try Task.checkCancellation()
         }
 
-        await status("正在加载 Whisper 模型（第一次加载需要编译，可能要一两分钟）…")
+        await status(PreparationStatus("正在加载 Whisper 模型（第一次加载需要编译，可能要一两分钟）…"))
         let config = WhisperKitConfig(
             model: model,
             downloadBase: base,
