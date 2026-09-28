@@ -10,7 +10,8 @@ final class OverlayController {
     private var panel: OverlayPanel?
 
     private var moveStart: (origin: NSPoint, mouse: NSPoint)?
-    private var resizeStart: (frame: NSRect, mouse: NSPoint)?
+    private var resizeStart: (frame: NSRect, mouse: NSPoint, edges: ResizeEdges)?
+    private var container: OverlayContainerView?
 
     static let minimumSize = NSSize(width: 280, height: 70)
 
@@ -29,11 +30,19 @@ final class OverlayController {
         )
         let hosting = OverlayHostingView(rootView: root)
         hosting.sizingOptions = []
-        panel.contentView = hosting
+        let container = OverlayContainerView(content: hosting, controller: self)
+        panel.contentView = container
         self.panel = panel
+        self.container = container
 
         ChangeObserver.observe({ [settingsStore] in settingsStore.settings.overlayLocked }) { [weak self] locked in
-            self?.panel?.ignoresMouseEvents = locked
+            guard let self else { return }
+            self.panel?.ignoresMouseEvents = locked
+            self.container?.resizingEnabled = !locked
+            if locked {
+                self.moveStart = nil
+                self.endResize()
+            }
         }
         ChangeObserver.observe({ [settingsStore] in settingsStore.settings.overlayVisible }) { [weak self] visible in
             self?.applyVisibility(visible)
@@ -81,7 +90,7 @@ final class OverlayController {
     // MARK: 拖动与缩放（使用屏幕坐标，避免窗口移动带来的坐标抖动）
 
     func dragChanged() {
-        guard let panel else { return }
+        guard let panel, !isResizing else { return }
         let mouse = NSEvent.mouseLocation
         if moveStart == nil {
             moveStart = (panel.frame.origin, mouse)
@@ -96,23 +105,31 @@ final class OverlayController {
         saveFrame()
     }
 
-    func resizeChanged() {
-        guard let panel else { return }
-        let mouse = NSEvent.mouseLocation
-        if resizeStart == nil {
-            resizeStart = (panel.frame, mouse)
-        }
-        guard let start = resizeStart else { return }
-        let dx = mouse.x - start.mouse.x
-        let dy = mouse.y - start.mouse.y
-        let width = max(Self.minimumSize.width, start.frame.width + dx)
-        let height = max(Self.minimumSize.height, start.frame.height - dy)
-        // 右下角拖动：左上角固定
-        let frame = NSRect(x: start.frame.minX, y: start.frame.maxY - height, width: width, height: height)
-        panel.setFrame(frame, display: true)
+    /// 由四边四角的 AppKit 缩放手柄调用（见 OverlayContainerView）
+    var isResizing: Bool { resizeStart != nil }
+
+    func beginResize(edges: ResizeEdges) {
+        guard let panel, !isLocked else { return }
+        moveStart = nil
+        resizeStart = (panel.frame, NSEvent.mouseLocation, edges)
     }
 
-    func resizeEnded() {
+    func continueResize() {
+        guard let panel, let start = resizeStart else { return }
+        let mouse = NSEvent.mouseLocation
+        let frame = OverlayGeometry.resized(
+            OverlayFrame(start.frame),
+            edges: start.edges,
+            dx: mouse.x - start.mouse.x,
+            dy: mouse.y - start.mouse.y,
+            minWidth: Self.minimumSize.width,
+            minHeight: Self.minimumSize.height
+        )
+        panel.setFrame(NSRect(frame), display: true)
+    }
+
+    func endResize() {
+        guard resizeStart != nil else { return }
         resizeStart = nil
         saveFrame()
     }
@@ -121,17 +138,12 @@ final class OverlayController {
 
     private func saveFrame() {
         guard let frame = panel?.frame else { return }
-        settingsStore.settings.overlayFrame = OverlayFrame(
-            x: frame.origin.x,
-            y: frame.origin.y,
-            width: frame.width,
-            height: frame.height
-        )
+        settingsStore.settings.overlayFrame = OverlayFrame(frame)
     }
 
     private func initialFrame() -> NSRect {
         if let saved = settingsStore.settings.overlayFrame {
-            let rect = NSRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
+            let rect = NSRect(saved)
             if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(rect) }) {
                 return rect
             }
@@ -153,5 +165,17 @@ final class OverlayController {
             panel.setFrame(defaultFrame(), display: true)
             saveFrame()
         }
+    }
+}
+
+extension OverlayFrame {
+    init(_ rect: NSRect) {
+        self.init(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height)
+    }
+}
+
+extension NSRect {
+    init(_ frame: OverlayFrame) {
+        self.init(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
 }

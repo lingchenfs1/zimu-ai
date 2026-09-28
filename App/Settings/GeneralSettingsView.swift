@@ -76,6 +76,14 @@ struct GeneralSettingsView: View {
                         Text(language.name).tag(language.code)
                     }
                 }
+                .onChange(of: store.settings.targetLanguage) { _, primary in
+                    store.settings.additionalTargetLanguages.removeAll { $0 == primary }
+                }
+                LabeledContent("同时翻译成") {
+                    let extras = store.settings.translationTargets.dropFirst().map { Languages.displayName(for: $0) }
+                    Text(extras.isEmpty ? "无（在 设置 › 翻译 中添加）" : extras.joined(separator: "、"))
+                        .foregroundStyle(.secondary)
+                }
                 Text("Apple 本地识别（单一语言）需要选择原声语言；多语言、WhisperKit 和云端识别可以自动判断语言（在 设置 › 识别 中切换）。识别和翻译相关的设置在下次开始字幕时生效。")
                     .font(.caption)
                     .foregroundStyle(.secondary)

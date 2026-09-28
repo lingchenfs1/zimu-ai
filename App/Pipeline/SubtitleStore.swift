@@ -2,11 +2,14 @@ import Foundation
 import Observation
 import ZimuCore
 
-/// 悬浮窗要显示的一行（原文 / 译文）
+/// 悬浮窗要显示的一条字幕（原文 / 译文）
 struct SubtitleDisplayItem: Identifiable, Equatable {
     let id: String
     var original: String?
+    /// 主目标语言的译文
     var translation: String?
+    /// 同时翻译成的其他语言的译文（按设置中的顺序，只包含已有的）
+    var additionalTranslations: [String] = []
     /// 实时草稿（还在识别中）
     var isLive: Bool
     /// 原文是否以「弱化」样式显示（仅译文模式下译文还没出来时）
@@ -40,30 +43,31 @@ final class SubtitleStore {
         now = Date()
     }
 
+    /// 提交一句字幕；targets 为要翻译成的语言（主目标语言在前），为空表示不翻译
     @discardableResult
-    func commit(_ segment: SubtitleSegment, needsTranslation: Bool) -> Int {
-        let id = timeline.commit(segment, needsTranslation: needsTranslation, at: Date())
+    func commit(_ segment: SubtitleSegment, targets: [String]) -> Int {
+        let id = timeline.commit(segment, targets: targets, at: Date())
         now = Date()
         return id
     }
 
-    func updateTranslation(id: Int, text: String, isFinal: Bool) {
-        timeline.updateTranslation(id: id, text: text, isFinal: isFinal, at: Date())
+    func updateTranslation(id: Int, target: String, text: String, isFinal: Bool) {
+        timeline.updateTranslation(id: id, target: target, text: text, isFinal: isFinal, at: Date())
         now = Date()
     }
 
-    func markTranslationFailed(id: Int, message: String) {
-        timeline.markTranslationFailed(id: id, message: message, at: Date())
+    func markTranslationFailed(id: Int, target: String, message: String) {
+        timeline.markTranslationFailed(id: id, target: target, message: message, at: Date())
         now = Date()
     }
 
-    func setLiveTranslation(_ text: String, source: String, isComplete: Bool) {
-        timeline.setLiveTranslation(text, source: source, isComplete: isComplete)
+    func setLiveTranslation(_ text: String, source: String, target: String, isComplete: Bool) {
+        timeline.setLiveTranslation(text, source: source, target: target, isComplete: isComplete)
         now = Date()
     }
 
-    func markTranslationSkipped(id: Int) {
-        timeline.markTranslationSkipped(id: id)
+    func markTranslationSkipped(id: Int, target: String) {
+        timeline.markTranslationSkipped(id: id, target: target)
     }
 
     func startSession() {
@@ -95,35 +99,32 @@ final class SubtitleStore {
         var items: [SubtitleDisplayItem] = timeline
             .visibleEntries(now: now, maxCount: max(1, settings.maxVisibleEntries), clearAfter: settings.clearAfterSeconds)
             .map { entry in
-                let translation = entry.translation.trimmingCharacters(in: .whitespacesAndNewlines)
-                let hasTranslation = !translation.isEmpty
-                var original: String? = mode.showsOriginal ? entry.original : nil
-                var dim = false
-                if !mode.showsOriginal && !hasTranslation {
-                    // 仅译文模式下译文还没到（或不翻译 / 翻译失败），先弱化显示原文
-                    original = entry.original
-                    dim = true
-                }
-                return SubtitleDisplayItem(
-                    id: "entry-\(entry.id)",
-                    original: original,
-                    translation: mode.showsTranslation && hasTranslation ? translation : nil,
-                    isLive: false,
-                    dimOriginal: dim
-                )
+                let texts = entry.translations.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                return makeItem(id: "entry-\(entry.id)", original: entry.original, translations: texts, isLive: false, mode: mode)
             }
         if settings.showLiveText, timeline.isLiveTextVisible(now: now, clearAfter: settings.clearAfterSeconds) {
-            let liveTranslation = timeline.liveTranslationMatchesLiveText ? timeline.liveTranslation : ""
-            let hasTranslation = mode.showsTranslation && !liveTranslation.isEmpty
-            items.append(SubtitleDisplayItem(
-                id: "live",
-                original: mode.showsOriginal || !hasTranslation ? timeline.liveText : nil,
-                translation: hasTranslation ? liveTranslation : nil,
-                isLive: true,
-                dimOriginal: true
-            ))
+            // 实时译文的目标语言顺序以本次运行提交的字幕为准，没有时按设置
+            let targets = timeline.entries.last?.translations.map(\.target) ?? settings.translationTargets
+            let texts = targets.map { timeline.liveTranslation(for: $0) ?? "" }
+            items.append(makeItem(id: "live", original: timeline.liveText, translations: texts, isLive: true, mode: mode))
         }
         return items
+    }
+
+    /// translations 第一个是主目标语言，空字符串表示该语言的译文还没有
+    private func makeItem(id: String, original: String, translations: [String], isLive: Bool, mode: SubtitleDisplayMode) -> SubtitleDisplayItem {
+        let primary = translations.first.flatMap { $0.isEmpty ? nil : $0 }
+        let additional = translations.dropFirst().filter { !$0.isEmpty }
+        let hasTranslation = mode.showsTranslation && (primary != nil || !additional.isEmpty)
+        return SubtitleDisplayItem(
+            id: id,
+            // 仅译文模式下译文还没到（或不翻译 / 翻译失败），先弱化显示原文
+            original: mode.showsOriginal || !hasTranslation ? original : nil,
+            translation: mode.showsTranslation ? primary : nil,
+            additionalTranslations: mode.showsTranslation ? Array(additional) : [],
+            isLive: isLive,
+            dimOriginal: isLive || !mode.showsOriginal
+        )
     }
 
     private func visibilitySignature(at date: Date, settings: AppSettings) -> [Int] {

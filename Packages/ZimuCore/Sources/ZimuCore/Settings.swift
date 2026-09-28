@@ -117,6 +117,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var sourceLanguage: String = "en-US"
     /// 目标语言（BCP-47，例如 "zh-Hans"）
     public var targetLanguage: String = "zh-Hans"
+    /// 同时翻译成的其他语言（主目标语言之外，最多 maximumAdditionalTargets 种；决策 D17）
+    public var additionalTargetLanguages: [String] = []
     /// 只捕获某个 App 的音频；nil 表示捕获全部系统音频
     public var captureBundleID: String?
 
@@ -175,6 +177,19 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var hotkeysEnabled: Bool = true
 
     public init() {}
+
+    /// 主目标语言之外最多再同时翻译成几种语言
+    public static let maximumAdditionalTargets = 2
+
+    /// 实际要翻译成的语言：主目标语言在前，去掉重复，最多 1 + maximumAdditionalTargets 种
+    public var translationTargets: [String] {
+        var targets = [targetLanguage]
+        for code in additionalTargetLanguages where !code.isEmpty && !targets.contains(code) {
+            guard targets.count < 1 + Self.maximumAdditionalTargets else { break }
+            targets.append(code)
+        }
+        return targets
+    }
 }
 
 /// 设置的读写：缺失字段使用默认值，便于以后新增设置项时兼容旧数据。

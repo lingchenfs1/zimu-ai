@@ -5,13 +5,18 @@ public struct SubtitleRecord: Sendable, Equatable {
     public var start: TimeInterval
     public var end: TimeInterval
     public var original: String
-    public var translation: String?
+    /// 各目标语言的译文（主目标语言在前，只包含已有的译文）
+    public var translations: [String]
 
-    public init(start: TimeInterval, end: TimeInterval, original: String, translation: String?) {
+    public init(start: TimeInterval, end: TimeInterval, original: String, translations: [String]) {
         self.start = start
         self.end = end
         self.original = original
-        self.translation = translation
+        self.translations = translations
+    }
+
+    public init(start: TimeInterval, end: TimeInterval, original: String, translation: String?) {
+        self.init(start: start, end: end, original: original, translations: translation.map { [$0] } ?? [])
     }
 }
 
@@ -24,13 +29,15 @@ public enum SRTFormatter {
         var index = 1
         for record in records {
             var lines: [String] = []
-            let translation = record.translation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let translations = record.translations
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
             switch mode {
             case .bilingual:
-                if !translation.isEmpty { lines.append(translation) }
+                lines.append(contentsOf: translations)
                 lines.append(record.original)
             case .translationOnly:
-                lines.append(translation.isEmpty ? record.original : translation)
+                lines.append(contentsOf: translations.isEmpty ? [record.original] : translations)
             case .originalOnly:
                 lines.append(record.original)
             }
