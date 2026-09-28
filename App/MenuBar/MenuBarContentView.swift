@@ -40,6 +40,11 @@ struct MenuBarContentView: View {
                         Text(pipeline.runningDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let language = pipeline.activeLanguage {
+                            Text("当前：\(Locale.current.localizedString(forIdentifier: language) ?? language)")
+                                .font(.caption)
+                                .foregroundStyle(Color.accentColor)
+                        }
                         Spacer()
                         LevelMeter(level: pipeline.level)
                             .frame(width: 80, height: 6)
@@ -47,7 +52,7 @@ struct MenuBarContentView: View {
                 }
                 switch pipeline.state {
                 case .preparing(let message):
-                    Label(message, systemImage: "hourglass").font(.caption)
+                    PreparationProgressView(status: PreparationStatus(message, fraction: pipeline.preparationProgress))
                 case .failed(let message):
                     Text(message)
                         .font(.caption)
@@ -97,12 +102,9 @@ struct MenuBarContentView: View {
                     .disabled(!model.subtitles.hasHistory)
                 Spacer()
                 Button("设置…") { model.openSettings() }
-                Button {
-                    NSApp.terminate(nil)
-                } label: {
-                    Image(systemName: "power")
-                }
-                .help("退出字幕AI")
+                Button("退出") { model.quit() }
+                    .keyboardShortcut("q")
+                    .help("退出字幕AI")
             }
         }
         .padding(14)

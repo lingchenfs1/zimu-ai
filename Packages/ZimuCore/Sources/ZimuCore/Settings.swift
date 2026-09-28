@@ -3,16 +3,48 @@ import Foundation
 /// 语音识别引擎类型
 public enum TranscriptionEngineKind: String, Codable, CaseIterable, Sendable, Identifiable {
     case apple
+    case appleMultilingual
+    case whisperKit
     case openAICompatible
 
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
-        case .apple: return "Apple 本地识别"
-        case .openAICompatible: return "OpenAI 兼容云端识别"
+        case .apple: return "Apple 本地识别（单一语言）"
+        case .appleMultilingual: return "Apple 本地识别（多语言自动切换）"
+        case .whisperKit: return "WhisperKit 本地识别（自动检测语言）"
+        case .openAICompatible: return "OpenAI 兼容云端识别（可自动检测语言）"
         }
     }
+
+    /// 是否支持「自动检测」原声语言
+    public var supportsAutoDetect: Bool {
+        switch self {
+        case .apple, .appleMultilingual: return false
+        case .whisperKit, .openAICompatible: return true
+        }
+    }
+}
+
+/// WhisperKit 可选模型
+public struct WhisperModelOption: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    public let sizeDescription: String
+
+    public init(id: String, name: String, sizeDescription: String) {
+        self.id = id
+        self.name = name
+        self.sizeDescription = sizeDescription
+    }
+
+    public static let all: [WhisperModelOption] = [
+        WhisperModelOption(id: "openai_whisper-tiny", name: "Tiny（最快，准确度一般）", sizeDescription: "约 75 MB"),
+        WhisperModelOption(id: "openai_whisper-base", name: "Base（推荐）", sizeDescription: "约 145 MB"),
+        WhisperModelOption(id: "openai_whisper-small", name: "Small（更准确）", sizeDescription: "约 480 MB"),
+        WhisperModelOption(id: "openai_whisper-large-v3-v20240930_turbo_632MB", name: "Large v3 Turbo（最准确，需要较强性能）", sizeDescription: "约 632 MB"),
+    ]
 }
 
 /// 翻译引擎类型
@@ -91,8 +123,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
     // MARK: 识别
     public var transcriptionEngine: TranscriptionEngineKind = .apple
     public var cloudTranscription = OpenAIServiceConfig(baseURL: "https://api.openai.com/v1", model: "gpt-4o-mini-transcribe")
-    /// 云端识别的语音检测灵敏度 0...1
+    /// 云端识别 / WhisperKit 的语音检测灵敏度 0...1
     public var vadSensitivity: Double = 0.5
+    /// Apple 多语言识别的候选语言（2～4 种）
+    public var appleCandidateLanguages: [String] = ["en-US", "zh-CN", "ja-JP"]
+    /// WhisperKit 模型
+    public var whisperModel: String = "openai_whisper-base"
+    /// WhisperKit 模型下载地址（HuggingFace 镜像），空表示官方地址
+    public var whisperEndpoint: String = ""
 
     // MARK: 翻译
     public var translationEngine: TranslationEngineKind = .apple
@@ -102,6 +140,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var translationTemperature: Double = 0.3
     /// 追加到系统 prompt 的自定义要求
     public var customTranslationPrompt: String = ""
+    /// 识别过程中实时翻译还没说完的句子（Apple 本地翻译免费且快，建议开启；云端服务会增加调用次数）
+    public var liveTranslation: Bool = true
+    /// OpenAI 兼容翻译的并发请求数
+    public var translationConcurrency: Int = 3
+    /// OpenAI 兼容翻译的额外请求参数（JSON）
+    public var llmExtraBody: String = ""
 
     // MARK: 外观
     public var displayMode: SubtitleDisplayMode = .bilingual

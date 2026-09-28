@@ -8,6 +8,8 @@ struct TranscriptionSettingsView: View {
     @State private var isTesting = false
     @State private var modelStatus: String?
     @State private var isDownloading = false
+    @State private var preparation: PreparationStatus?
+    @State private var supportedLocales: [Locale] = []
 
     var body: some View {
         @Bindable var store = model.settingsStore
@@ -21,25 +23,71 @@ struct TranscriptionSettingsView: View {
                     }
                 }
                 .pickerStyle(.radioGroup)
+                .onChange(of: store.settings.transcriptionEngine) { _, _ in
+                    modelStatus = nil
+                    testResult = nil
+                }
             }
 
             switch store.settings.transcriptionEngine {
             case .apple:
-                Section("Apple 本地识别") {
-                    Text("在本机离线识别，免费、延迟低、不上传音频。首次使用某种语言时需要下载模型。")
+                Section("Apple 本地识别（单一语言）") {
+                    Text("在本机离线识别，免费、延迟最低、不上传音频。需要在 设置 › 通用 中选择原声语言，首次使用某种语言时会下载模型。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     LabeledContent("原声语言") {
                         Text(Locale.current.localizedString(forIdentifier: store.settings.sourceLanguage) ?? store.settings.sourceLanguage)
                     }
+                    modelDownloadRow {
+                        let engine = AppleSpeechEngine(localeIdentifier: store.settings.sourceLanguage)
+                        _ = try await engine.prepare { status in preparation = status }
+                    }
+                }
+            case .appleMultilingual:
+                Section("Apple 本地识别（多语言自动切换）") {
+                    Text("同时运行多种语言的本地识别器，按识别置信度自动切换到正在说的语言。请勾选 2～4 种可能出现的语言；勾选越多越耗电。同一句话里混说多种语言时效果一般。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    CandidateLanguagePicker(
+                        selection: $store.settings.appleCandidateLanguages,
+                        locales: supportedLocales,
+                        maximum: AppleMultilingualSpeechEngine.maximumLanguages
+                    )
+                    modelDownloadRow {
+                        let engine = AppleMultilingualSpeechEngine(localeIdentifiers: store.settings.appleCandidateLanguages)
+                        _ = try await engine.prepare { status in preparation = status }
+                    }
+                }
+            case .whisperKit:
+                Section("WhisperKit 本地识别（自动检测语言）") {
+                    Text("使用开源 Whisper 模型在本机识别，可自动识别近百种语言，不上传音频。需要先下载模型；比 Apple 识别更耗 CPU / GPU，延迟约 1～2 秒。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Picker("模型", selection: $store.settings.whisperModel) {
+                        ForEach(WhisperModelOption.all) { option in
+                            Text("\(option.name) · \(option.sizeDescription)").tag(option.id)
+                        }
+                    }
+                    TextField("下载地址（镜像）", text: $store.settings.whisperEndpoint, prompt: Text("留空使用 huggingface.co"))
                     HStack {
-                        Button(isDownloading ? "正在下载…" : "检查 / 下载语言模型") {
-                            downloadModel(for: store.settings.sourceLanguage)
-                        }
-                        .disabled(isDownloading)
-                        if let modelStatus {
-                            Text(modelStatus).font(.caption).foregroundStyle(.secondary)
-                        }
+                        Text("国内网络可以填写 HuggingFace 镜像地址。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("使用 hf-mirror.com") { store.settings.whisperEndpoint = "https://hf-mirror.com" }
+                            .controlSize(.small)
+                    }
+                    LabeledSlider(title: "语音检测灵敏度", value: $store.settings.vadSensitivity, range: 0...1, step: 0.05, format: { "\(Int($0 * 100))%" })
+                    if WhisperKitTranscriber.isModelDownloaded(store.settings.whisperModel) {
+                        Text("✅ 模型已下载").font(.caption)
+                    }
+                    modelDownloadRow(title: "下载 / 加载模型") {
+                        let transcriber = WhisperKitTranscriber(
+                            model: store.settings.whisperModel,
+                            endpoint: store.settings.whisperEndpoint,
+                            language: store.settings.sourceLanguage
+                        )
+                        try await transcriber.prepare { status in preparation = status }
                     }
                 }
             case .openAICompatible:
@@ -51,7 +99,7 @@ struct TranscriptionSettingsView: View {
                     SecureField("API Key", text: $keys.transcriptionKey, prompt: Text("sk-…（本地服务可留空）"))
                     TextField("模型", text: $store.settings.cloudTranscription.model, prompt: Text("gpt-4o-mini-transcribe"))
                     LabeledSlider(title: "语音检测灵敏度", value: $store.settings.vadSensitivity, range: 0...1, step: 0.05, format: { "\(Int($0 * 100))%" })
-                    Text("音频按句子切段后上传，字幕会比本地识别慢 1～3 秒。API Key 保存在钥匙串中。")
+                    Text("原声语言选「自动检测」时，每段音频都会自动判断语言（设置 › 通用）。音频按句子切段后上传，字幕会比本地识别慢 1～3 秒。API Key 保存在钥匙串中。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     TestButton(title: "测试连接", isTesting: isTesting, result: testResult) {
@@ -61,20 +109,42 @@ struct TranscriptionSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .task {
+            supportedLocales = await SpeechLocaleCatalog.supportedLocales()
+        }
     }
 
-    private func downloadModel(for language: String) {
-        isDownloading = true
-        modelStatus = nil
-        Task { @MainActor in
-            do {
-                let engine = AppleSpeechEngine(localeIdentifier: language)
-                _ = try await engine.prepare { message in modelStatus = message }
-                modelStatus = "✅ 模型已就绪"
-            } catch {
-                modelStatus = "❌ \(error.localizedDescription)"
+    /// 「检查 / 下载模型」按钮、进度条和结果
+    @ViewBuilder
+    private func modelDownloadRow(title: String = "检查 / 下载语言模型", action: @escaping @MainActor () async throws -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button(isDownloading ? "正在准备…" : title) {
+                    isDownloading = true
+                    modelStatus = nil
+                    preparation = PreparationStatus("正在检查模型…")
+                    Task { @MainActor in
+                        do {
+                            try await action()
+                            modelStatus = "✅ 模型已就绪"
+                        } catch {
+                            modelStatus = "❌ \(error.localizedDescription)"
+                        }
+                        isDownloading = false
+                        preparation = nil
+                    }
+                }
+                .disabled(isDownloading)
+                if let modelStatus {
+                    Text(modelStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            isDownloading = false
+            if isDownloading {
+                PreparationProgressView(status: preparation)
+            }
         }
     }
 
@@ -102,6 +172,66 @@ struct TranscriptionSettingsView: View {
     }
 }
 
+/// 多语言识别的候选语言选择
+struct CandidateLanguagePicker: View {
+    @Binding var selection: [String]
+    let locales: [Locale]
+    let maximum: Int
+
+    private static let common = ["en-US", "zh-CN", "ja-JP", "ko-KR", "fr-FR", "de-DE", "es-ES", "yue-CN", "zh-TW"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("候选语言（已选 \(selection.count) / 最多 \(maximum)）")
+                Spacer()
+                if selection.count < 2 {
+                    Text("至少选择 2 种").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            let options = orderedOptions()
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), alignment: .leading)], alignment: .leading, spacing: 4) {
+                ForEach(options, id: \.self) { identifier in
+                    Toggle(isOn: binding(for: identifier)) {
+                        Text(Locale.current.localizedString(forIdentifier: identifier) ?? identifier)
+                            .lineLimit(1)
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(!selection.contains(identifier) && selection.count >= maximum)
+                }
+            }
+        }
+    }
+
+    /// 常用语言排前面，其余按系统支持列表
+    private func orderedOptions() -> [String] {
+        let supported = locales.map { $0.identifier(.bcp47) }
+        var result: [String] = []
+        for id in Self.common + selection where !result.contains(id) && (supported.isEmpty || supported.contains(id) || selection.contains(id)) {
+            result.append(id)
+        }
+        for id in supported where !result.contains(id) {
+            result.append(id)
+        }
+        return result
+    }
+
+    private func binding(for identifier: String) -> Binding<Bool> {
+        Binding(
+            get: { selection.contains(identifier) },
+            set: { isOn in
+                if isOn {
+                    if !selection.contains(identifier), selection.count < maximum {
+                        selection.append(identifier)
+                    }
+                } else {
+                    selection.removeAll { $0 == identifier }
+                }
+            }
+        )
+    }
+}
+
 /// 翻译设置
 struct TranslationSettingsView: View {
     @Environment(AppModel.self) private var model
@@ -124,6 +254,14 @@ struct TranslationSettingsView: View {
                     ForEach(Languages.targets) { language in
                         Text(language.name).tag(language.code)
                     }
+                }
+                if store.settings.translationEngine != .none {
+                    Toggle("实时翻译识别中的文字", isOn: $store.settings.liveTranslation)
+                    Text(store.settings.translationEngine == .apple
+                         ? "一句话还没说完就开始翻译，译文基本与原文同步（Apple 本地翻译免费，建议开启）。"
+                         : "一句话还没说完就开始翻译，译文更及时，但会明显增加 API 调用次数和费用。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -155,6 +293,11 @@ struct TranslationSettingsView: View {
                     SecureField("API Key", text: $keys.translationKey, prompt: Text("sk-…（本地服务可留空）"))
                     TextField("模型", text: $store.settings.llmTranslation.model, prompt: Text("gpt-4o-mini"))
                     Stepper("参考前文 \(store.settings.translationContextLines) 句", value: $store.settings.translationContextLines, in: 0...8)
+                    Stepper("同时翻译 \(store.settings.translationConcurrency) 句", value: $store.settings.translationConcurrency, in: 1...6)
+                    TextField("额外请求参数（JSON）", text: $store.settings.llmExtraBody, prompt: Text(#"例如 {"enable_thinking": false}"#))
+                    Text("使用 Qwen3、DeepSeek-R1 等「思考」模型时，关闭思考能大幅降低延迟：通义千问填 {\"enable_thinking\": false}。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     LabeledSlider(title: "温度", value: $store.settings.translationTemperature, range: 0...1, step: 0.05, format: { String(format: "%.2f", $0) })
                     VStack(alignment: .leading, spacing: 4) {
                         Text("额外要求（可选）")
@@ -244,6 +387,31 @@ struct ShortcutsSettingsView: View {
 }
 
 // MARK: - 小组件
+
+/// 下载 / 准备进度条：已知进度时显示百分比，未知时显示不确定进度条
+struct PreparationProgressView: View {
+    let status: PreparationStatus?
+
+    var body: some View {
+        let message = status?.message ?? "正在准备…"
+        if let fraction = status?.fraction {
+            ProgressView(value: fraction) {
+                Text(message).font(.caption)
+            } currentValueLabel: {
+                Text("\(Int((fraction * 100).rounded()))%")
+                    .font(.caption)
+                    .monospacedDigit()
+            }
+        } else {
+            ProgressView {
+                Text(message)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .progressViewStyle(.linear)
+        }
+    }
+}
 
 enum TestResult: Equatable {
     case success(String)

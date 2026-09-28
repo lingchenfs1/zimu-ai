@@ -46,8 +46,32 @@ final class AppModel {
     }
 
     func applicationWillTerminate() {
-        pipeline.stop()
         HotKeyCenter.shared.unregisterAll()
+    }
+
+    // MARK: 退出（阶段 8.2）
+
+    @ObservationIgnored private var isTerminating = false
+
+    /// 菜单栏「退出」
+    func quit() {
+        demo.stop()
+        // 兜底：无论什么原因 4 秒内没退出就强制退出（在后台线程计时，主线程卡住也有效）
+        DispatchQueue.global().asyncAfter(deadline: .now() + 4) {
+            exit(0)
+        }
+        NSApp.terminate(nil)
+    }
+
+    /// applicationShouldTerminate：需要时先停止音频捕获再退出
+    func prepareForTermination() -> NSApplication.TerminateReply {
+        guard pipeline.needsShutdown, !isTerminating else { return .terminateNow }
+        isTerminating = true
+        Task { @MainActor in
+            await self.pipeline.shutdown(timeout: 2)
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     // MARK: 操作
@@ -86,23 +110,25 @@ final class AppModel {
             ?? FileManager.default.temporaryDirectory
         let url = folder.appendingPathComponent("字幕AI-系统音频测试-\(formatter.string(from: Date())).wav")
 
-        let capture = SystemAudioCapture()
-        do {
-            try capture.start(
-                bundleID: settingsStore.settings.captureBundleID,
-                outputFormat: nil,
-                onBuffer: { _ in },
-                onLevel: { _ in }
-            )
-        } catch {
-            isRecordingTestAudio = false
-            showAlert(title: "无法开始录制", message: error.localizedDescription)
-            return
-        }
-        capture.record(to: url, duration: 10) { [weak self] savedURL in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    capture.stop()
+        let bundleID = settingsStore.settings.captureBundleID
+        Task { @MainActor in
+            let capture = SystemAudioCapture()
+            do {
+                // 在后台线程启动：第一次使用时会弹出授权对话框（决策 D11）
+                try await capture.startInBackground(
+                    bundleID: bundleID,
+                    outputFormat: nil,
+                    onBuffer: { _ in },
+                    onLevel: { _ in }
+                )
+            } catch {
+                isRecordingTestAudio = false
+                showAlert(title: "无法开始录制", message: error.localizedDescription)
+                return
+            }
+            capture.record(to: url, duration: 10) { [weak self] savedURL in
+                Task { @MainActor in
+                    await capture.stopInBackground()
                     self?.isRecordingTestAudio = false
                     if let savedURL {
                         NSWorkspace.shared.activateFileViewerSelecting([savedURL])

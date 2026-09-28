@@ -51,8 +51,16 @@ struct GeneralSettingsView: View {
             }
 
             Section("语言") {
+                if store.settings.transcriptionEngine == .appleMultilingual {
+                    LabeledContent("原声语言") {
+                        Text(store.settings.appleCandidateLanguages
+                            .map { Locale.current.localizedString(forIdentifier: $0) ?? $0 }
+                            .joined(separator: "、") + "（自动切换）")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
                 Picker("原声语言", selection: $store.settings.sourceLanguage) {
-                    if store.settings.transcriptionEngine == .openAICompatible {
+                    if store.settings.transcriptionEngine.supportsAutoDetect {
                         Text("自动检测").tag("auto")
                     }
                     ForEach(sourceLocales, id: \.identifier) { locale in
@@ -62,12 +70,13 @@ struct GeneralSettingsView: View {
                         Text(localeName(Locale(identifier: store.settings.sourceLanguage))).tag(store.settings.sourceLanguage)
                     }
                 }
+                }
                 Picker("翻译成", selection: $store.settings.targetLanguage) {
                     ForEach(Languages.targets) { language in
                         Text(language.name).tag(language.code)
                     }
                 }
-                Text("Apple 本地识别需要手动选择原声语言；云端识别可以自动检测。识别和翻译相关的设置在下次开始字幕时生效。")
+                Text("Apple 本地识别（单一语言）需要选择原声语言；多语言、WhisperKit 和云端识别可以自动判断语言（在 设置 › 识别 中切换）。识别和翻译相关的设置在下次开始字幕时生效。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

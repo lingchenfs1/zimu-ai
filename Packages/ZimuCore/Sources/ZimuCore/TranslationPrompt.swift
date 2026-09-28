@@ -20,17 +20,19 @@ public enum TranslationPrompt {
         return prompt
     }
 
-    public static func userMessage(text: String, context: [String]) -> String {
+    public static func userMessage(text: String, context: [String], sourceLanguage: String? = nil) -> String {
         let lines = context
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard !lines.isEmpty else { return text }
+        let languageHint = sourceLanguage.flatMap { Languages.isoLanguageCode($0) }
+            .map { "The line is in \(Languages.englishName(for: $0)).\n" } ?? ""
+        guard !lines.isEmpty else { return languageHint.isEmpty ? text : "\(languageHint)Translate this line:\n\(text)" }
         let contextBlock = lines.map { "- \($0)" }.joined(separator: "\n")
         return """
         Previous lines (context only, do not translate):
         \(contextBlock)
 
-        Translate this line:
+        \(languageHint)Translate this line:
         \(text)
         """
     }

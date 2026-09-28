@@ -54,8 +54,9 @@ private struct SubtitleItemView: View {
             if let translation = item.translation {
                 Text(translation)
                     .font(.system(size: settings.translationFontSize, weight: settings.boldText ? .semibold : .regular))
-                    .foregroundStyle(Color(hex: settings.translationColorHex, fallback: .yellow))
-                    .lineLimit(3)
+                    .foregroundStyle(Color(hex: settings.translationColorHex, fallback: .yellow).opacity(item.isLive ? 0.85 : 1))
+                    .lineLimit(item.isLive ? 2 : 3)
+                    .truncationMode(item.isLive ? .head : .tail)
             }
             if let original = item.original {
                 Text(original)
