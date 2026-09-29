@@ -187,6 +187,13 @@ public struct SubtitleTimeline: Sendable {
         entries[index].updatedAt = date
     }
 
+    /// 用 AI 校对后的文字替换原文（决策 D20）
+    public mutating func updateOriginal(id: Int, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = entries.lastIndex(where: { $0.id == id }) else { return }
+        entries[index].original = trimmed
+    }
+
     public mutating func markTranslationFailed(id: Int, target: String, message: String, at date: Date) {
         guard let (index, slot) = location(id: id, target: target) else { return }
         entries[index].translations[slot].state = .failed(message)

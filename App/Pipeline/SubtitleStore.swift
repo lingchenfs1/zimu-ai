@@ -56,6 +56,11 @@ final class SubtitleStore {
         now = Date()
     }
 
+    func updateOriginal(id: Int, text: String) {
+        timeline.updateOriginal(id: id, text: text)
+        now = Date()
+    }
+
     func markTranslationFailed(id: Int, target: String, message: String) {
         timeline.markTranslationFailed(id: id, target: target, message: message, at: Date())
         now = Date()

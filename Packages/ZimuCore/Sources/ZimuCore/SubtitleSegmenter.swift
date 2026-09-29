@@ -37,8 +37,8 @@ public struct SubtitleSegmenter: Sendable {
     public init(
         maxCharacters: Int = 90,
         maxNoSpaceCharacters: Int = 32,
-        maxDuration: TimeInterval = 7,
-        idleFlushInterval: TimeInterval = 1.2
+        maxDuration: TimeInterval = 10,
+        idleFlushInterval: TimeInterval = 1.8
     ) {
         self.maxCharacters = maxCharacters
         self.maxNoSpaceCharacters = maxNoSpaceCharacters
@@ -72,13 +72,23 @@ public struct SubtitleSegmenter: Sendable {
         return result + extractCompleted(at: date)
     }
 
-    /// 定期调用：长时间无活动或超过最长时长时输出缓存文本
+    /// 定期调用：长时间无活动时输出缓存文本；超过最长时长时在停顿处（逗号等）切出前半句，没有停顿处才全部输出
     public mutating func flushIfNeeded(now: Date) -> [SubtitleSegment] {
         guard !pendingText.isEmpty else { return [] }
         if let last = lastActivity, now.timeIntervalSince(last) >= idleFlushInterval {
             return flush(now: now)
         }
         if let start = pendingStart, now.timeIntervalSince(start) >= maxDuration {
+            if let cut = SentenceSplitter.lastSoftBreak(in: pendingText) {
+                let head = String(pendingText[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let rest = String(pendingText[cut...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !head.isEmpty, !rest.isEmpty {
+                    let segment = SubtitleSegment(text: head, start: start, end: now, language: pendingLanguage)
+                    pendingText = rest
+                    pendingStart = now
+                    return TextUtilities.isOnlyPunctuation(head) ? [] : [segment]
+                }
+            }
             return flush(now: now)
         }
         return []

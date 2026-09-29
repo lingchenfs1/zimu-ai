@@ -164,11 +164,23 @@ zimu-ai/
 ### 阶段 9：v1.2 用户实测反馈（2026-09-28）
 > 反馈：v1.1.0 功能测试正常；① 拖动缩放字幕窗大小失败；② 希望能同时翻译成多种语言。
 
-- [ ] 9.1 缩放修复：改用 AppKit 缩放手柄（四条边 + 四个角，带缩放光标），不受字幕内容遮挡，也不和拖动手势冲突（待用户实测）
-- [ ] 9.2 多目标语言：主目标语言之外可再选最多 2 种「同时翻译成」的语言；每句分别翻译，字幕中依次显示；实时翻译、Apple 语言包检查、SRT 导出都支持多种译文（待用户实测）
+- [x] 9.1 缩放修复：改用 AppKit 缩放手柄（四条边 + 四个角，带缩放光标），不受字幕内容遮挡，也不和拖动手势冲突
+- [x] 9.2 多目标语言：主目标语言之外可再选最多 2 种「同时翻译成」的语言；每句分别翻译，字幕中依次显示；实时翻译、Apple 语言包检查、SRT 导出都支持多种译文
 - [x] 9.3 发布 v1.2.0
 
 **验收**：解锁后能从四边和四角拖动缩放字幕窗；同时选择两种以上目标语言时，每句字幕显示全部译文。
+
+### 阶段 10：v1.3 用户实测反馈（2026-09-29）
+> 反馈：v1.2.0 功能正常；① 识别精度仍然不够（Apple 本地识别单一语言：同音错字、人名 / 专有名词错、漏句 / 断句不对、语言判断错）；② 用 API 翻译（Ollama / LM Studio 本机模型）时字幕里出现了思维链，需要调好提示词；③ 同意新增可选的「用 AI 校对识别文字」。
+
+- [ ] 10.1 去掉思维链：输出过滤支持成对推理标签、只有结束标签、gpt-oss 格式；流式输出在推理结束前不显示；忽略 `reasoning_content` / `reasoning` 字段（待用户实测）
+- [ ] 10.2 自动关闭模型思考：按服务附加参数（Ollama / LM Studio `reasoning_effort: none` 等），用户参数优先，HTTP 400 时去掉自动参数重试；推理模型提示（待用户实测）
+- [ ] 10.3 内置调好的翻译提示词：说明原文来自语音识别、只输出译文、不回答字幕里的问句；按目标语言的风格提示；「翻译场景」；术语表；提示词预览（待用户实测）
+- [ ] 10.4 识别精度：「识别模式」准确优先（默认，去掉 `.fastResults`）/ 速度优先；断句放宽（停顿 1.8 秒、最长 10 秒、在停顿处切）；「专有名词」；「纠错替换」（待用户实测）
+- [ ] 10.5 用 AI 校对识别文字（可选，默认关）：OpenAI 兼容翻译的主目标语言请求同时返回校正后的原文，差异过大不采用；字幕、上下文、SRT 使用校正后的原文（待用户实测）
+- [ ] 10.6 发布 v1.3.0
+
+**验收**：用 Ollama / LM Studio 的思考模型翻译时，字幕不再出现任何思考文字；同一段视频在「准确优先」下错字明显减少，长句不再被切碎；专有名词、纠错替换、AI 校对生效。
 
 ## 5. 关键技术要点 / 已知坑
 
@@ -183,7 +195,7 @@ zimu-ai/
 - 同一次运行中字幕 id 单调递增（`SubtitleTimeline.reset()` 不重置 id），避免上一轮迟到的译文写到新字幕上。
 - 聚合设备优先只包含 Tap（参考 audiotee），不把输出设备加进来：带麦克风的输出设备（耳机、AirPods）会让聚合设备多出输入流并可能激活麦克风；失败时才退回 AudioCap 的「输出设备 + Tap」方式，并在回调中只取最后的 Tap buffer。
 - 不要把 `kAudioObjectUnknown` 放进 Tap 的排除列表，否则 `AudioHardwareCreateProcessTap` 返回 560947818，看起来像权限被拒。
-- SpeechAnalyzer 不需要 `SFSpeechRecognizer` 授权（只需系统录音权限）；`.fastResults` 可降低延迟；结果流抛错后会话结束，需关闭输入流并按致命错误处理。
+- SpeechAnalyzer 不需要 `SFSpeechRecognizer` 授权（只需系统录音权限）；`.fastResults` 可降低延迟但会牺牲准确度（默认不用，见 D19）；`AnalysisContext.contextualStrings` 只对 DictationTranscriber 生效，SpeechTranscriber 没有自定义词汇接口；结果流抛错后会话结束，需关闭输入流并按致命错误处理。
 - `AnalyzerInputConverter` 等是 macOS 27 API，不能用；音频格式转换自己用 AVAudioConverter 做。
 - 停止识别时引擎还会吐出最后的定稿结果：接收事件的运行编号（eventRunID）要在引擎停止后才失效。
 - Apple 翻译在源语言与目标语言相同时（如 zh-CN → zh-Hans）直接返回原文，比较前先转成 maximalIdentifier。
@@ -191,6 +203,7 @@ zimu-ai/
 - WhisperKit 1.1.0 的 `WhisperKit.download` 每次都会联网检查文件，模型已完整下载时要直接用本地目录；取消下载不会抛错，需自己检查 `Task.isCancelled`。
 - 多语言并行识别时，各语言识别器会对同一段音频各输出一份定稿结果：切换语言时按音频时间范围去重。
 - 第一次系统音频授权会阻塞调用线程：Core Audio 的 Tap / 聚合设备操作只能在后台队列执行（D11）。
+- 本机模型的聊天模板常把 `<think>` 放在提示里，模型只输出「推理…</think>译文」：过滤时只见到结束标签也要删掉之前的内容。Ollama / LM Studio 的 OpenAI 兼容接口关闭思考只认 `"reasoning_effort": "none"`（Ollama 不认 `think`）；部分「始终思考」的模型会拒绝关闭思考的参数（HTTP 400）。
 - 浏览器的声音通常来自子进程（如 `com.google.Chrome.helper`、Safari 的 `com.apple.WebKit.GPU`），指定应用捕获时按 bundle ID 前缀匹配；Safari 请在列表中选择 WebKit 进程或直接用「全部系统音频」。
 
 ## 6. 决策记录
@@ -204,6 +217,9 @@ zimu-ai/
 | D5 | 2026-09-27 | XcodeGen + ZimuCore 本地包 + GitHub Actions macos-26 | 工程文件纯文本易维护；纯逻辑可测试；云端容器无法编译 macOS 代码 |
 | D6 | 2026-09-27 | App target 使用 Swift 5 语言模式（Swift 6.2 编译器），ZimuCore 保持 Swift 6 严格并发 | 云端容器无法本地编译，Swift 6 模式的并发报错只能靠 CI 反复试；且 Swift 6 模式会对音频回调等 C 回调插入运行时隔离断言，容易在音频线程崩溃。平台代码自行保证线程安全（音频类标注 nonisolated / 专用队列） |
 | D7 | 2026-09-27 | `TranscriptionEngine` 协议放在 App 层（依赖 AVAudioPCMBuffer），`TranscriptEvent` 等数据类型放 ZimuCore；`TranslationEngine` 协议放 ZimuCore | 识别引擎输入是 AVFoundation 类型，ZimuCore 保持不依赖 Apple 专有框架 |
+| D20 | 2026-09-29 | AI 校对识别文字：只在 OpenAI 兼容翻译的主目标语言整句请求中进行，输出 `<source>…</source><translation>…</translation>`；校正结果与识别结果的归一化编辑距离超过 50% 或为空时不采用 | 不增加请求次数；防止模型改写、润色或胡编原文 |
+| D19 | 2026-09-29 | 识别默认「准确优先」（SpeechTranscriber 不用 `.fastResults`），保留「速度优先」选项；断句放宽（停顿 1.8 秒、最长 10 秒、强制切分时在停顿标点处切）；SpeechTranscriber 没有词汇接口，专有名词靠识别后的「纠错替换」和 AI 校对解决 | 用户反馈识别精度不够、长句被切碎；`.fastResults` 按文档会牺牲准确度；实时草稿行照常显示，放宽断句不影响看到文字的速度 |
+| D18 | 2026-09-29 | OpenAI 兼容翻译默认自动关闭模型思考：按服务地址附加参数（Ollama / LM Studio `reasoning_effort: none`、百炼 / 硅基流动 `enable_thinking: false`、智谱 / 火山方舟 `thinking.type: disabled`、OpenAI gpt-5 `reasoning_effort: minimal`、Qwen3 `/no_think`），用户额外参数优先；服务返回 HTTP 400 时去掉自动参数重试一次并在本次运行中记住；输出过滤去掉各种形式的推理内容 | 用户在本机模型上看到思维链；思考模式下字幕翻译又慢又会漏出推理；不同服务参数不同且部分模型拒绝该参数 |
 | D17 | 2026-09-28 | 多目标语言：保留原 `targetLanguage` 作为主目标语言，新增 `additionalTargetLanguages`（最多 2 种）；每种目标语言各建一个翻译引擎实例；`SubtitleEntry` 改为按目标语言保存译文与状态（保留主语言的便捷属性） | 兼容旧设置与现有代码；各目标语言独立翻译、互不阻塞 |
 | D16 | 2026-09-28 | 字幕窗缩放改用 AppKit 手柄视图（覆盖在 SwiftUI 内容之上，处理 mouseDown/mouseDragged 并设置缩放光标），不再用 SwiftUI 手势 | SwiftUI 缩放角标会被字幕背景遮挡、与整窗拖动手势冲突，用户实测缩放失败 |
 | D15 | 2026-09-27 | `TranscriptEvent.final` 携带语言代码；`TranslationEngine.translate` 增加 `sourceLanguage`，并支持批量翻译 | 多语言识别时翻译需要知道每句的源语言；Apple 翻译批量接口更快 |
@@ -236,3 +252,5 @@ zimu-ai/
 - 2026-09-28 | 9.1 | 缩放修复：悬浮窗根视图改为 OverlayContainerView（SwiftUI 字幕 + 四边四角的 AppKit ResizeHandleView，带系统缩放光标），缩放几何放入 ZimuCore（OverlayGeometry + 单测）；SwiftUI 右下角按钮只保留为提示图标 | 本地 macOS 26.5 SDK 类型检查零错误零警告；Linux 上 `swift test` 全部通过 | 待用户实测
 - 2026-09-28 | 9.2 | 多目标语言：设置新增 additionalTargetLanguages（最多 2 种）+ translationTargets；时间线按目标语言保存译文和实时译文；TranslationJob 带目标语言，调度器按目标语言限流、分批；流水线每种目标语言一个翻译引擎，实时翻译并行；字幕窗依次显示多种译文；SRT 导出全部译文；设置页「同时翻译成」多选、每种语言单独显示 Apple 语言包状态、测试翻译覆盖全部语言；演示字幕可预览多语样式；版本号 1.2.0 (3) | 同上（ZimuCore 76 个测试通过） | 待用户实测
 - 2026-09-28 | 9.1 / 9.3 | 解锁提示栏（「锁定」按钮、提示标签）内缩避开四角缩放手柄；合并 PR lingchenfs1/zimu-ai#4，通过 CI 手动发布 v1.2.0（Release 附 ZimuAI-1.2.0.dmg） | 本地 SDK 类型检查、Linux `swift test`；CI；Release 页面 | 9.1、9.2 待用户实测
+- 2026-09-29 | 9.1 / 9.2 | 用户实测 v1.2.0：缩放与多目标语言正常，勾选 9.1、9.2；反馈识别精度不够、API 翻译出现思维链 → 新增阶段 10 与决策 D18–D20 | 用户实测 | 阶段 10 待开发
+- 2026-09-29 | 10.1–10.5 | 思维链：新增 ReasoningFilter（成对推理标签、只有结束标签、gpt-oss 格式、「译文：」前缀）和 StreamingTranslationFilter（推理结束前不显示，见过推理后按会话记住）；ThinkingControl 按服务自动关闭思考，用户参数优先，HTTP 400 去掉自动参数重试；重写翻译提示词（语音识别原文、只输出译文、不回答问句、目标语言风格）+ 翻译场景 + 术语表 + 提示词预览；识别模式（准确优先去掉 fastResults）、断句放宽并在停顿处切、专有名词、纠错替换（TextCorrections）；AI 校对（<source>/<translation> 输出、差异阈值 50%、updateOriginal）；版本号 1.3.0 (4) | 本地 macOS 26.5 SDK 类型检查零错误零警告；Linux 上 ZimuCore 109 个测试通过 | 待用户实测

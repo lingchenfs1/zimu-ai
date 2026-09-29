@@ -220,8 +220,11 @@ final class SegmentWorkQueue: @unchecked Sendable {
 /// 云端识别：OpenAI 兼容的 /audio/transcriptions
 final class CloudSegmentTranscriber: SegmentTranscriber {
     private let client: OpenAITranscriptionClient
+    /// 专有名词：放在 prompt 开头，帮助识别人名和术语
+    private let glossary: [String]
 
-    init(config: OpenAIServiceConfig, apiKey: String, sourceLanguage: String) {
+    init(config: OpenAIServiceConfig, apiKey: String, sourceLanguage: String, glossary: [String] = []) {
+        self.glossary = glossary
         client = OpenAITranscriptionClient(
             config: config,
             apiKey: apiKey,
@@ -242,7 +245,9 @@ final class CloudSegmentTranscriber: SegmentTranscriber {
 
     func transcribe(samples: [Float], prompt: String?) async throws -> (text: String, language: String?) {
         let wav = WAVEncoder.encode(samples: samples, sampleRate: Int(SegmentedTranscriptionEngine.sampleRate))
-        let text = try await client.transcribe(wav: wav, prompt: prompt)
+        let terms = glossary.isEmpty ? nil : glossary.joined(separator: ", ")
+        let fullPrompt = [terms, prompt].compactMap { $0 }.joined(separator: "\n")
+        let text = try await client.transcribe(wav: wav, prompt: fullPrompt.isEmpty ? nil : fullPrompt)
         return (text, client.language)
     }
 }

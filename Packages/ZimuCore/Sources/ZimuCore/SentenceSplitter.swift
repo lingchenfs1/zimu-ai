@@ -60,6 +60,15 @@ public enum SentenceSplitter {
         return lastSpace ?? lastSoft ?? limit
     }
 
+    /// 最后一个停顿标点（逗号、分号等）之后的位置；只在它位于文本后 60% 之内（前半句不会太短）时返回
+    public static func lastSoftBreak(in text: String) -> String.Index? {
+        guard let index = text.lastIndex(where: { softBreaks.contains($0) }) else { return nil }
+        let after = text.index(after: index)
+        guard after < text.endIndex else { return nil }
+        let offset = text.distance(from: text.startIndex, to: after)
+        return Double(offset) >= Double(text.count) * 0.4 ? after : nil
+    }
+
     /// 句点前的单词是否是常见缩写（Mr. / Dr. / e.g.）或单个大写字母（姓名缩写）
     static func isAbbreviation(in text: String, periodIndex: String.Index) -> Bool {
         var start = periodIndex
