@@ -38,6 +38,7 @@ struct TranscriptionSettingsView: View {
                     LabeledContent("原声语言") {
                         Text(Locale.current.localizedString(forIdentifier: store.settings.sourceLanguage) ?? store.settings.sourceLanguage)
                     }
+                    recognitionModePicker($store.settings.recognitionMode)
                     modelDownloadRow {
                         let engine = AppleSpeechEngine(localeIdentifier: store.settings.sourceLanguage)
                         _ = try await engine.prepare { status in preparation = status }
@@ -53,6 +54,7 @@ struct TranscriptionSettingsView: View {
                         locales: supportedLocales,
                         maximum: AppleMultilingualSpeechEngine.maximumLanguages
                     )
+                    recognitionModePicker($store.settings.recognitionMode)
                     modelDownloadRow {
                         let engine = AppleMultilingualSpeechEngine(localeIdentifiers: store.settings.appleCandidateLanguages)
                         _ = try await engine.prepare { status in preparation = status }
@@ -107,11 +109,57 @@ struct TranscriptionSettingsView: View {
                     }
                 }
             }
+
+            Section("专有名词与纠错（对所有识别引擎生效）") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("专有名词")
+                    TextEditor(text: $store.settings.glossary)
+                        .font(.body)
+                        .frame(minHeight: 44)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                    Text("人名、品牌、术语等，一行一个或用逗号分隔。用于 AI 翻译、AI 校对和云端识别，让译名和写法保持一致。Apple 本地识别不支持自定义词汇，经常听错的词请用下面的纠错替换。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("纠错替换")
+                        Spacer()
+                        let count = TextCorrections(parsing: store.settings.correctionRules).rules.count
+                        if count > 0 {
+                            Text("已生效 \(count) 条").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    TextEditor(text: $store.settings.correctionRules)
+                        .font(.body.monospaced())
+                        .frame(minHeight: 60)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                    Text("一行一条「识别结果 → 正确写法」（也可以用 -> 或 =），例如：克劳德 → Claude、cloud code → Claude Code。英文按整词匹配、不区分大小写；中文按字面匹配。识别出的文字先替换再断句和翻译。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .task {
             supportedLocales = await SpeechLocaleCatalog.supportedLocales()
         }
+    }
+
+    /// Apple 本地识别的「识别模式」（决策 D19）
+    @ViewBuilder
+    private func recognitionModePicker(_ selection: Binding<RecognitionMode>) -> some View {
+        Picker("识别模式", selection: selection) {
+            ForEach(RecognitionMode.allCases) { mode in
+                Text(mode.displayName).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        Text(selection.wrappedValue == .accurate
+             ? "错字更少。每句会晚一点定稿，但识别中的文字仍然实时显示。"
+             : "定稿更快，但同音字、专有名词更容易识别错。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     /// 「检查 / 下载模型」按钮、进度条和结果
@@ -307,8 +355,18 @@ struct TranslationSettingsView: View {
                     TextField("模型", text: $store.settings.llmTranslation.model, prompt: Text("gpt-4o-mini"))
                     Stepper("参考前文 \(store.settings.translationContextLines) 句", value: $store.settings.translationContextLines, in: 0...8)
                     Stepper("同时翻译 \(store.settings.translationConcurrency) 句", value: $store.settings.translationConcurrency, in: 1...6)
-                    TextField("额外请求参数（JSON）", text: $store.settings.llmExtraBody, prompt: Text(#"例如 {"enable_thinking": false}"#))
-                    Text("使用 Qwen3、DeepSeek-R1 等「思考」模型时，关闭思考能大幅降低延迟：通义千问填 {\"enable_thinking\": false}。")
+                    thinkingControls(store.settings)
+                    TextField("额外请求参数（JSON）", text: $store.settings.llmExtraBody, prompt: Text(#"例如 {"top_p": 0.8}"#))
+                    Text("会合并到请求体中，同名字段优先于自动附加的参数。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("翻译场景", selection: $store.settings.translationScenario) {
+                        ForEach(TranslationScenario.allCases) { scenario in
+                            Text(scenario.displayName).tag(scenario)
+                        }
+                    }
+                    Toggle("用 AI 校对识别文字", isOn: $store.settings.aiSourceCorrection)
+                    Text("翻译主目标语言时让模型顺便改正识别错的字（同音字、听错的人名 / 术语、标点），字幕显示校正后的原文。不增加请求次数；改动过大时自动保留原识别结果。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     LabeledSlider(title: "温度", value: $store.settings.translationTemperature, range: 0...1, step: 0.05, format: { String(format: "%.2f", $0) })
@@ -322,6 +380,12 @@ struct TranslationSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    DisclosureGroup("查看发送给模型的提示词") {
+                        Text(promptPreview(store.settings))
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     TestButton(title: "测试翻译", isTesting: isTesting, result: testResult) {
                         testTranslation()
                     }
@@ -329,6 +393,40 @@ struct TranslationSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// 「自动关闭模型思考」开关、将附加的参数和推理模型提示（决策 D18）
+    @ViewBuilder
+    private func thinkingControls(_ settings: AppSettings) -> some View {
+        @Bindable var store = model.settingsStore
+        Toggle("自动关闭模型思考（推荐）", isOn: $store.settings.disableThinking)
+        let parameters = ThinkingControl.describe(ThinkingControl.parameters(baseURL: settings.llmTranslation.baseURL, model: settings.llmTranslation.model))
+        let suffix = ThinkingControl.promptSuffix(model: settings.llmTranslation.model)
+        Group {
+            if settings.disableThinking {
+                if parameters.isEmpty && suffix == nil {
+                    Text("当前服务不需要额外参数。模型输出的思考过程会被自动过滤，不会显示在字幕上。")
+                } else {
+                    let parts = [parameters.isEmpty ? nil : parameters, suffix.map { "提示词末尾的 \($0)" }].compactMap { $0 }
+                    Text("将自动附加 \(parts.joined(separator: " 和 "))。服务不支持时会自动去掉重试；模型输出的思考过程也会被自动过滤。")
+                }
+            } else {
+                Text("已关闭：思考模型会先思考再翻译，延迟明显增加（思考过程仍会被过滤）。")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        if ThinkingControl.looksLikeReasoningModel(settings.llmTranslation.model) {
+            Text("⚠️ 这个模型看起来是推理模型，翻译延迟会很高，也可能无法关闭思考。建议换成非推理模型，例如 qwen2.5、qwen3（自动关闭思考）、deepseek-chat、gpt-4o-mini。")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func promptPreview(_ settings: AppSettings) -> String {
+        OpenAICompatibleTranslator
+            .configured(from: settings, apiKey: "", targetLanguage: settings.targetLanguage, client: URLSessionHTTPClient())
+            .systemPrompt(correctSource: settings.aiSourceCorrection)
     }
 
     /// 把一句英文翻译成每种目标语言
@@ -352,13 +450,10 @@ struct TranslationSettingsView: View {
                         try await apple.prepare()
                         engine = apple
                     case .openAICompatible:
-                        engine = OpenAICompatibleTranslator(
-                            config: settings.llmTranslation,
+                        engine = OpenAICompatibleTranslator.configured(
+                            from: settings,
                             apiKey: model.apiKeys.translationKey,
                             targetLanguage: target,
-                            temperature: settings.translationTemperature,
-                            customInstructions: settings.customTranslationPrompt,
-                            extraBodyJSON: settings.llmExtraBody,
                             client: URLSessionHTTPClient()
                         )
                     }

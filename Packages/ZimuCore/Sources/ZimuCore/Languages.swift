@@ -52,6 +52,24 @@ public enum Languages {
         option(for: code)?.englishName ?? code
     }
 
+    /// 提示词中针对目标语言的字幕风格说明
+    public static func subtitleStyleHint(for code: String) -> String {
+        let lower = code.lowercased()
+        if lower.hasPrefix("zh-hant") || lower == "zh-tw" || lower == "zh-hk" {
+            return "Use Traditional Chinese with full-width punctuation (，。？！) and no spaces between Chinese characters."
+        }
+        switch isoLanguageCode(code) {
+        case "zh":
+            return "Use Simplified Chinese with full-width punctuation (，。？！) and no spaces between Chinese characters."
+        case "ja":
+            return "Use natural spoken Japanese with Japanese punctuation (、。？！)."
+        case "ko":
+            return "Use natural spoken Korean."
+        default:
+            return "Use natural, conversational \(englishName(for: code))."
+        }
+    }
+
     /// 用于界面的中文语言名
     public static func displayName(for code: String) -> String {
         option(for: code)?.name ?? code

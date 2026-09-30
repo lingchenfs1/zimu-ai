@@ -66,6 +66,10 @@ final class PipelineController {
     @ObservationIgnored private var liveTranslationTask: Task<Void, Never>?
     @ObservationIgnored private var liveTranslationDirty = false
     @ObservationIgnored private var lastLiveTranslation = Date.distantPast
+    /// 识别结果的纠错替换（决策 D19）
+    @ObservationIgnored private var corrections = TextCorrections(rules: [])
+    /// 用 AI 校对识别文字（决策 D20）：主目标语言的整句请求同时返回校正后的原文
+    @ObservationIgnored private var aiSourceCorrection = false
 
     private var needsTranslation: Bool { !translationTargets.isEmpty }
 
@@ -133,6 +137,8 @@ final class PipelineController {
         self.translators = translators
         translationTargets = settings.translationTargets.filter { translators[$0] != nil }
         configureTranslation(settings)
+        corrections = TextCorrections(parsing: settings.correctionRules)
+        aiSourceCorrection = settings.aiSourceCorrection && settings.translationEngine == .openAICompatible
 
         segmenter = SubtitleSegmenter()
         partialText = ""
@@ -280,11 +286,11 @@ final class PipelineController {
         let now = Date()
         switch event {
         case .partial(let text):
-            partialText = text
+            partialText = corrections.apply(to: text)
             if !text.isEmpty { segmenter.notePartial(at: now) }
         case .final(let text, let language):
             partialText = ""
-            commit(segmenter.appendFinal(text, language: language, at: now))
+            commit(segmenter.appendFinal(corrections.apply(to: text), language: language, at: now))
         }
         updateLiveText()
     }
@@ -314,11 +320,18 @@ final class PipelineController {
             let targets = translationTargets
             let id = subtitles.commit(segment, targets: targets)
             for target in targets {
-                // 实时译文恰好对应这句原文时直接复用，省去一次翻译
-                if let reused = subtitles.timeline.reusableLiveTranslation(for: segment.text, target: target) {
-                    subtitles.updateTranslation(id: id, target: target, text: reused, isFinal: true)
+                let job = TranslationJob(id: id, text: segment.text, language: segment.language, target: target)
+                guard let reused = subtitles.timeline.reusableLiveTranslation(for: segment.text, target: target) else {
+                    enqueueTranslation(job)
+                    continue
+                }
+                if correctsSource(for: target) {
+                    // AI 校对需要再请求一次：先显示实时译文，校对结果回来后替换
+                    subtitles.updateTranslation(id: id, target: target, text: reused, isFinal: false)
+                    enqueueTranslation(job)
                 } else {
-                    enqueueTranslation(TranslationJob(id: id, text: segment.text, language: segment.language, target: target))
+                    // 实时译文恰好对应这句原文时直接复用，省去一次翻译
+                    subtitles.updateTranslation(id: id, target: target, text: reused, isFinal: true)
                 }
             }
         }
@@ -385,9 +398,29 @@ final class PipelineController {
         }
     }
 
+    /// 这个目标语言的整句请求是否同时校对识别文字（只用主目标语言，不增加请求次数）
+    private func correctsSource(for target: String) -> Bool {
+        aiSourceCorrection && target == translationTargets.first && translators[target] is OpenAICompatibleTranslator
+    }
+
     private func runTranslation(_ batch: [TranslationJob], target: String, translator: TranslationEngine, generation: Int) async {
         do {
-            if batch.count == 1, let job = batch.first {
+            if batch.count == 1, let job = batch.first, correctsSource(for: target),
+               let llm = translator as? OpenAICompatibleTranslator {
+                let context = subtitles.recentOriginals(before: job.id, count: contextLines)
+                // 已先显示了实时译文：不再逐字刷新（否则会先变短再变长），等校对结果一次替换
+                let prefilled = !(subtitles.timeline.entry(id: job.id)?.translation(for: target)?.text.isEmpty ?? true)
+                let result = try await llm.translateCorrectingSource(job.text, sourceLanguage: job.language, context: context) { [weak self] partial in
+                    guard !prefilled, let self, self.translationGeneration == generation else { return }
+                    self.subtitles.updateTranslation(id: job.id, target: target, text: partial, isFinal: false)
+                }
+                guard translationGeneration == generation else { return }
+                // 改动过大或为空时不采用，避免模型改写原文（决策 D20）
+                if let corrected = SourceCorrection.accepted(original: job.text, corrected: result.source) {
+                    subtitles.updateOriginal(id: job.id, text: corrected)
+                }
+                subtitles.updateTranslation(id: job.id, target: target, text: result.translation, isFinal: true)
+            } else if batch.count == 1, let job = batch.first {
                 let context = subtitles.recentOriginals(before: job.id, count: contextLines)
                 let result = try await translator.translate(job.text, sourceLanguage: job.language, context: context) { [weak self] partial in
                     guard let self, self.translationGeneration == generation else { return }
@@ -498,9 +531,9 @@ final class PipelineController {
         switch settings.transcriptionEngine {
         case .apple:
             guard settings.sourceLanguage != "auto" else { throw TranscriptionError.autoDetectNotSupported }
-            return AppleSpeechEngine(localeIdentifier: settings.sourceLanguage)
+            return AppleSpeechEngine(localeIdentifier: settings.sourceLanguage, mode: settings.recognitionMode)
         case .appleMultilingual:
-            return AppleMultilingualSpeechEngine(localeIdentifiers: settings.appleCandidateLanguages)
+            return AppleMultilingualSpeechEngine(localeIdentifiers: settings.appleCandidateLanguages, mode: settings.recognitionMode)
         case .whisperKit:
             return SegmentedTranscriptionEngine(
                 transcriber: WhisperKitTranscriber(
@@ -515,7 +548,8 @@ final class PipelineController {
                 transcriber: CloudSegmentTranscriber(
                     config: settings.cloudTranscription,
                     apiKey: apiKeys.transcriptionKey,
-                    sourceLanguage: settings.sourceLanguage
+                    sourceLanguage: settings.sourceLanguage,
+                    glossary: Glossary.terms(from: settings.glossary)
                 ),
                 sensitivity: settings.vadSensitivity
             )
@@ -546,14 +580,14 @@ final class PipelineController {
         case .openAICompatible:
             _ = try OpenAIEndpoint.url(base: settings.llmTranslation.baseURL, path: OpenAIEndpoint.chatCompletionsPath)
             _ = try OpenAICompatibleTranslator.parseExtraBody(settings.llmExtraBody)
+            // 同一服务的各目标语言共享一份会话状态：见过推理输出、自动参数被拒绝都只需发现一次
+            let session = TranslatorSessionState()
             for target in settings.translationTargets {
-                translators[target] = OpenAICompatibleTranslator(
-                    config: settings.llmTranslation,
+                translators[target] = OpenAICompatibleTranslator.configured(
+                    from: settings,
                     apiKey: apiKeys.translationKey,
                     targetLanguage: target,
-                    temperature: settings.translationTemperature,
-                    customInstructions: settings.customTranslationPrompt,
-                    extraBodyJSON: settings.llmExtraBody,
+                    session: session,
                     client: URLSessionHTTPClient()
                 )
             }

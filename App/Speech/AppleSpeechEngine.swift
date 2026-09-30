@@ -5,14 +5,16 @@ import ZimuCore
 /// Apple 本地语音识别（macOS 26 SpeechAnalyzer + SpeechTranscriber），单一语言
 final class AppleSpeechEngine: TranscriptionEngine {
     private let localeIdentifier: String
+    private let mode: RecognitionMode
     private var transcriber: SpeechTranscriber?
     private var language: String?
     private var analyzer: SpeechAnalyzer?
     private var resultsTask: Task<Void, Never>?
     private let input = AnalyzerInputStream()
 
-    init(localeIdentifier: String) {
+    init(localeIdentifier: String, mode: RecognitionMode = .accurate) {
         self.localeIdentifier = localeIdentifier
+        self.mode = mode
     }
 
     @MainActor
@@ -31,7 +33,7 @@ final class AppleSpeechEngine: TranscriptionEngine {
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults, .fastResults],
+            reportingOptions: SpeechAssets.reportingOptions(for: mode),
             attributeOptions: []
         )
         try await SpeechAssets.ensureInstalled([transcriber], status: status)
@@ -100,6 +102,7 @@ final class AppleSpeechEngine: TranscriptionEngine {
 /// Apple 本地识别（多语言自动切换）：同时运行多个语言的识别器，按识别置信度判断正在说哪种语言。
 final class AppleMultilingualSpeechEngine: TranscriptionEngine {
     private let localeIdentifiers: [String]
+    private let mode: RecognitionMode
     private var modules: [(language: String, transcriber: SpeechTranscriber)] = []
     private var analyzer: SpeechAnalyzer?
     private var resultTasks: [Task<Void, Never>] = []
@@ -116,7 +119,8 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
 
     static let maximumLanguages = 4
 
-    init(localeIdentifiers: [String]) {
+    init(localeIdentifiers: [String], mode: RecognitionMode = .accurate) {
+        self.mode = mode
         var unique: [String] = []
         for id in localeIdentifiers where !unique.contains(id) {
             unique.append(id)
@@ -138,7 +142,7 @@ final class AppleMultilingualSpeechEngine: TranscriptionEngine {
             let transcriber = SpeechTranscriber(
                 locale: locale,
                 transcriptionOptions: [],
-                reportingOptions: [.volatileResults, .fastResults],
+                reportingOptions: SpeechAssets.reportingOptions(for: mode),
                 attributeOptions: [.transcriptionConfidence]
             )
             result.append((locale.identifier(.bcp47), transcriber))
@@ -300,6 +304,14 @@ final class AnalyzerInputStream {
 
 /// 语音模型下载、结束分析等公共逻辑
 enum SpeechAssets {
+    /// 识别模式对应的结果选项：准确优先不用 `.fastResults`（按文档它会牺牲准确度，决策 D19）
+    static func reportingOptions(for mode: RecognitionMode) -> Set<SpeechTranscriber.ReportingOption> {
+        switch mode {
+        case .accurate: return [.volatileResults]
+        case .fast: return [.volatileResults, .fastResults]
+        }
+    }
+
     /// 确保模型已安装；下载时显示进度
     @MainActor
     static func ensureInstalled(_ modules: [SpeechTranscriber], status: @escaping @MainActor (PreparationStatus) -> Void) async throws {

@@ -27,6 +27,60 @@ public enum TranscriptionEngineKind: String, Codable, CaseIterable, Sendable, Id
     }
 }
 
+/// Apple 本地识别的识别模式（决策 D19）
+public enum RecognitionMode: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// 准确优先：定稿稍晚，错字更少
+    case accurate
+    /// 速度优先：定稿更快，准确度略低（SpeechTranscriber 的 fastResults）
+    case fast
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .accurate: return "准确优先（推荐）"
+        case .fast: return "速度优先"
+        }
+    }
+}
+
+/// 翻译场景：在内置提示词之外追加对应的风格要求
+public enum TranslationScenario: String, Codable, CaseIterable, Sendable, Identifiable {
+    case general
+    case film
+    case lecture
+    case news
+    case gaming
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .general: return "通用"
+        case .film: return "影视剧对白"
+        case .lecture: return "课程讲座 / 技术分享"
+        case .news: return "新闻访谈"
+        case .gaming: return "游戏直播"
+        }
+    }
+
+    /// 追加到系统提示词的场景说明（英文，模型遵循得更好）
+    public var promptInstructions: String? {
+        switch self {
+        case .general:
+            return nil
+        case .film:
+            return "Scenario: movie / TV dialogue. Use colloquial, natural spoken language that fits the character and emotion; keep slang, jokes and tone; be very concise."
+        case .lecture:
+            return "Scenario: lecture, course or tech talk. Translate technical terms accurately and consistently; keep well-known English terms, product names and code identifiers as is; be clear and precise."
+        case .news:
+            return "Scenario: news or interview. Use a formal, accurate and neutral tone; keep names, titles, organizations, places and numbers precise."
+        case .gaming:
+            return "Scenario: game or live stream. Use a casual, lively tone; keep game terms, character, skill and item names as commonly used by players."
+        }
+    }
+}
+
 /// WhisperKit 可选模型
 public struct WhisperModelOption: Identifiable, Hashable, Sendable {
     public let id: String
@@ -133,6 +187,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var whisperModel: String = "openai_whisper-base"
     /// WhisperKit 模型下载地址（HuggingFace 镜像），空表示官方地址
     public var whisperEndpoint: String = ""
+    /// Apple 本地识别的识别模式（决策 D19）
+    public var recognitionMode: RecognitionMode = .accurate
+    /// 专有名词（人名、术语），一行一个或用逗号分隔：用于翻译提示词、AI 校对和云端识别
+    public var glossary: String = ""
+    /// 纠错替换，一行一条「错 → 对」：对识别结果生效
+    public var correctionRules: String = ""
 
     // MARK: 翻译
     public var translationEngine: TranslationEngineKind = .apple
@@ -148,6 +208,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var translationConcurrency: Int = 3
     /// OpenAI 兼容翻译的额外请求参数（JSON）
     public var llmExtraBody: String = ""
+    /// OpenAI 兼容翻译：按服务自动附加关闭模型思考的参数（决策 D18）
+    public var disableThinking: Bool = true
+    /// 翻译场景
+    public var translationScenario: TranslationScenario = .general
+    /// 用 AI 校对识别文字（仅 OpenAI 兼容翻译，决策 D20）
+    public var aiSourceCorrection: Bool = false
 
     // MARK: 外观
     public var displayMode: SubtitleDisplayMode = .bilingual

@@ -159,7 +159,7 @@ final class PromptTests: XCTestCase {
     }
 
     func testUserMessageWithoutContext() {
-        XCTAssertEqual(TranslationPrompt.userMessage(text: "Hi", context: ["  "]), "Hi")
+        XCTAssertEqual(TranslationPrompt.userMessage(text: "Hi", context: ["  "]), "<subtitle>Hi</subtitle>")
     }
 
     func testStreamParser() {
