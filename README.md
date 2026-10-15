@@ -11,12 +11,13 @@
 
 ## 安装
 
-1. 在 [Actions](https://github.com/lingchenfs1/zimu-ai/actions) 最新一次成功构建的 **Artifacts** 中下载 `ZimuAI-dmg`，或者在 [Releases](https://github.com/lingchenfs1/zimu-ai/releases) 下载 `ZimuAI-x.y.z.dmg`。
-2. 打开 DMG，把 **ZimuAI** 拖到「应用程序」文件夹。
-3. 没有用 Developer ID 签名公证的版本，第一次打开时会提示“无法验证开发者”。可以在「应用程序」里**右键点击 ZimuAI → 打开 → 打开**，或者在终端运行：
+1. 在公开的发布页 [zimu-ai-releases › Releases](https://github.com/lingchenfs1/zimu-ai-releases/releases) 下载 `ZimuAI-x.y.z.dmg`（v1.4.0 起）。
+2. 打开 DMG，把 **ZimuAI** 拖到「应用程序」文件夹，并从「应用程序」里打开（直接在 DMG 里运行无法在线更新）。
+3. 没有用 Developer ID 签名公证的版本，第一次打开时会提示“无法验证开发者”。先关闭提示，再到 **系统设置 › 隐私与安全性**，在页面下方点 **仍要打开**（macOS 15 起右键 → 打开不再有效）；或者在终端运行：
    ```bash
    xattr -dr com.apple.quarantine /Applications/ZimuAI.app
    ```
+4. 之后的新版本可以在软件内在线更新，见下方「在线更新」。
 
 ## 使用
 
@@ -62,6 +63,15 @@
 
 API Key 只保存在 macOS 钥匙串中。
 
+## 在线更新
+
+- 默认在启动时和每天检查一次新版本（设置 › 更新与关于 › 自动检查更新，可关闭）。发现新版本时，菜单栏面板顶部会显示「发现新版本」，点 **更新** 会下载、校验、安装并自动重启；点 **详情…** 可以查看更新说明、「跳过这个版本」或下载安装包手动安装。
+- 正在显示字幕时，安装前会先确认（安装会停止字幕并重启软件）。
+- 安全校验：只从 GitHub 的公开发布页下载；安装前校验文件的 SHA-256、应用标识、版本号和代码签名，并确认新版本与当前版本使用同一签名证书。任何一项不通过都不会安装。
+- 只访问 GitHub 公开接口，不上传任何数据；GitHub 未登录接口每个网络每小时最多 60 次，太频繁时会提示稍后再试。
+- 下面的情况无法原地更新，会提示改为手动安装：直接在 DMG 里运行；从「下载」等文件夹直接打开（系统会把它放到临时位置运行，请先拖到「应用程序」）；没有权限修改 App 所在的文件夹。
+- 更新后：「录制系统音频」权限一般会保留（v1.4.0 起使用固定的签名证书）；读取钥匙串里的 API Key 时，系统可能会要求输入一次登录密码，请点「始终允许」。
+
 ## 常见问题
 
 - **第一次开始字幕时没反应？** 第一次会弹出「录制系统音频」授权对话框，请点「允许」。控制面板会显示等待授权的提示；如果没有看到弹窗，到 系统设置 › 隐私与安全性 › 屏幕与系统录音 中允许「字幕AI」，然后重新开始。
@@ -87,7 +97,33 @@ scripts/package_dmg.sh                    # Release 构建后打包 DMG（输出
 
 - 每次推送到 PR / main，GitHub Actions 会在 macOS 26 上测试、构建，并把 DMG 作为构建产物上传。
 - 推送 `v*` 标签（例如 `git tag v1.0.0 && git push origin v1.0.0`）会自动创建 GitHub Release 并附上 DMG；也可以在 Actions 页面手动运行 **Build** 工作流并填写 `release_tag`（例如 `v1.0.1`），由 CI 在当前提交上创建标签和 Release。
-- 如果在仓库 Secrets 中配置了 `MACOS_CERTIFICATE`（Developer ID 证书 .p12 的 base64）、`MACOS_CERTIFICATE_PASSWORD`、`DEVELOPER_ID_APPLICATION`，CI 会用 Developer ID 签名；再配置 `NOTARY_APPLE_ID`、`NOTARY_PASSWORD`（App 专用密码）、`NOTARY_TEAM_ID` 会自动公证。未配置时使用本地签名。
+- 发布时会同时生成 `ZimuAI-x.y.z.dmg`（手动安装）和 `ZimuAI-x.y.z.zip`（软件内更新），并发布到主仓库和公开发布仓库 `lingchenfs1/zimu-ai-releases`。发布标签必须等于 `v<版本号>`。
+- 签名方式（按优先级）：
+  - 配置了 `MACOS_CERTIFICATE`（证书 .p12 的 base64）、`MACOS_CERTIFICATE_PASSWORD`、`DEVELOPER_ID_APPLICATION` 时用 Developer ID 签名；再配置 `NOTARY_APPLE_ID`、`NOTARY_PASSWORD`（App 专用密码）、`NOTARY_TEAM_ID` 会自动公证。
+  - 只配置了 `MACOS_CERTIFICATE`、`MACOS_CERTIFICATE_PASSWORD` 时，用其中的自签名证书签名（按 SHA-1 选择）。
+  - 都没有时使用本地（ad-hoc）签名。
+
+#### 在线更新的一次性配置（维护者）
+
+主仓库是私有的，用户电脑上的软件读不到私有仓库的 Release，所以在线更新读取一个**只放安装包的公开仓库**。
+
+1. **新建公开发布仓库**：在 GitHub 新建公开仓库 `lingchenfs1/zimu-ai-releases`，创建时勾选 **Add a README file**（发布时的标签建在它的默认分支上，仓库不能是空的）。
+2. **创建 token**：GitHub › Settings › Developer settings › Personal access tokens › **Fine-grained tokens** › Generate new token：
+   - Repository access 选 **Only select repositories** → `zimu-ai-releases`；
+   - Permissions › Repository permissions › **Contents: Read and write**；
+   - 设置一个到期时间并记下提醒（到期后发布会跳过公开仓库）。
+   - 在主仓库 Settings › Secrets and variables › Actions › **New repository secret**，名称 `RELEASES_TOKEN`。
+3. **创建自签名代码签名证书**（固定签名身份，让更新后保留系统音频权限、让更新器能校验同一签名）：
+   - 打开「钥匙串访问」› 菜单 钥匙串访问 › 证书助理 › **创建证书…**；
+   - 名称 `ZimuAI Code Signing`（英文），身份类型 **自签名根证书**，证书类型 **代码签名**，勾选 **让我覆盖这些默认值**；
+   - 有效期填 **3650**（天）或更长，其余保持默认，存到「登录」钥匙串；不要修改证书的信任设置。
+4. **导出证书并加到 Secrets**：
+   - 在「钥匙串访问」› 我的证书 中右键这张证书 › **导出…** › 文件格式 .p12，设置一个强密码；
+   - 终端运行 `base64 -i ZimuAI.p12 | pbcopy`，粘贴为 Secret `MACOS_CERTIFICATE`；密码存为 Secret `MACOS_CERTIFICATE_PASSWORD`；
+   - 终端运行 `security find-identity -p codesigning`，复制这张证书前面的 40 位十六进制 SHA-1，在 Settings › Secrets and variables › Actions › **Variables** 新建变量 `CODESIGN_IDENTITY_SHA1`（不是机密，会出现在签名里）。设置后，没有证书的发布会直接失败，防止发出签名不同、用户无法更新的版本。
+   - **把 .p12 和密码离线备份好**。证书丢失或更换后，已安装的用户无法通过「同一签名」校验，只能手动重装并重新授权。
+   - 不要设置 `DEVELOPER_ID_APPLICATION`（它的优先级更高，是给 Developer ID 证书用的）。
+5. 用 Actions › Build › Run workflow 填写 `release_tag` 发布。第一个带在线更新的版本（v1.4.0）需要用户手动安装一次。
 
 ## 项目结构
 

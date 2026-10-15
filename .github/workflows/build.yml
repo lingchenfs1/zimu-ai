@@ -13,8 +13,9 @@ on:
         default: ""
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # 手动发布（workflow_dispatch）单独排队，不会被推送触发的构建取消
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: write
@@ -30,6 +31,12 @@ jobs:
       NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
       NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
       NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+      # 软件内更新（决策 D21 / D22）：公开发布仓库的 token、自签名证书的 SHA-1（仓库变量）
+      RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+      RELEASES_REPOSITORY: lingchenfs1/zimu-ai-releases
+      CODESIGN_IDENTITY_SHA1: ${{ vars.CODESIGN_IDENTITY_SHA1 }}
+      IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v')) }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
 
@@ -71,14 +78,48 @@ jobs:
       - name: Import signing certificate
         if: env.MACOS_CERTIFICATE != ''
         run: |
-          KEYCHAIN_PASSWORD="$(uuidgen)"
+          # 证书可以是 Developer ID，也可以是自签名的「代码签名」证书（决策 D22）。
+          # 自签名证书不受信任也能签名：按 SHA-1 指定身份，并把临时钥匙串加入搜索列表。
+          KC="$RUNNER_TEMP/zimu-signing.keychain-db"
+          KCPW="$(uuidgen)"
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-          rm "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERTIFICATE_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # 不加 -v：自签名证书会显示 CSSMERR_TP_NOT_TRUSTED，这是正常的
+          security find-identity -p codesigning "$KC"
+          SHA1="$(security find-identity -p codesigning "$KC" | grep -Eo '[0-9A-F]{40}' | head -1)"
+          if [ -z "$SHA1" ]; then echo "::error::证书里没有代码签名身份"; exit 1; fi
+          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ "$SHA1" != "$(echo "$CODESIGN_IDENTITY_SHA1" | tr 'a-f' 'A-F')" ]; then
+            echo "::error::导入的证书（$SHA1）与仓库变量 CODESIGN_IDENTITY_SHA1 不一致"; exit 1
+          fi
+          {
+            echo "CODESIGN_KEYCHAIN=$KC"
+            echo "CODESIGN_IDENTITY=$SHA1"
+          } >> "$GITHUB_ENV"
+
+      - name: Check release prerequisites
+        if: env.IS_RELEASE == 'true'
+        run: |
+          APP="build/DerivedData/Build/Products/Release/ZimuAI.app"
+          VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
+          if [ "$RELEASE_TAG" != "v$VERSION" ]; then
+            echo "::error::发布标签 $RELEASE_TAG 与版本号 v$VERSION 不一致"; exit 1
+          fi
+          # 已经启用固定签名后，不能再发布 ad-hoc 版本，否则已安装的用户无法通过同一签名校验
+          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ -z "$MACOS_CERTIFICATE" ]; then
+            echo "::error::设置了 CODESIGN_IDENTITY_SHA1，但没有配置证书（MACOS_CERTIFICATE）"; exit 1
+          fi
+          if [ -z "$MACOS_CERTIFICATE" ]; then
+            echo "::warning::没有配置签名证书，本次发布使用 ad-hoc 签名（更新后系统音频权限需要重新允许）"
+          fi
+          if [ -z "$RELEASES_TOKEN" ]; then
+            echo "::warning::没有配置 RELEASES_TOKEN，不会发布到公开仓库 $RELEASES_REPOSITORY，软件内更新检测不到这个版本"
+          fi
 
       - name: Package DMG
         run: scripts/package_dmg.sh
@@ -87,12 +128,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ZimuAI-dmg
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
 
       - name: Prepare release notes
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v'))
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        if: env.IS_RELEASE == 'true'
         run: |
           NOTES="docs/releases/${RELEASE_TAG}.md"
           if [ -f "$NOTES" ]; then
@@ -102,11 +143,32 @@ jobs:
           fi
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v'))
+        if: env.IS_RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/*.zip
           body_path: release-notes.md
           generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      # 软件内更新读取的公开发布仓库（主仓库是私有的，决策 D21）。
+      # 不传 target_commitish：这个提交不在发布仓库里，标签建在发布仓库的默认分支上
+      - name: Publish to public releases repository
+        if: env.IS_RELEASE == 'true' && env.RELEASES_TOKEN != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.RELEASES_REPOSITORY }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: 字幕AI ${{ env.RELEASE_TAG }}
+          files: |
+            dist/*.dmg
+            dist/*.zip
+          body_path: release-notes.md
+          generate_release_notes: false
+          make_latest: "true"
+          fail_on_unmatched_files: true

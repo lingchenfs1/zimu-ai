@@ -15,6 +15,9 @@ final class AppModel {
     let pipeline: PipelineController
     let overlay: OverlayController
     let settingsWindow: SettingsWindowController
+    let updater: AppUpdater
+    /// 设置窗口当前的标签页
+    var settingsTab: SettingsTab = .general
 
     private(set) var isRecordingTestAudio = false
     private(set) var failedHotKeys: [String] = []
@@ -30,6 +33,7 @@ final class AppModel {
         self.pipeline = PipelineController(settingsStore: settingsStore, apiKeys: apiKeys, subtitles: subtitles)
         self.overlay = OverlayController(settingsStore: settingsStore, subtitles: subtitles)
         self.settingsWindow = SettingsWindowController()
+        self.updater = AppUpdater(settingsStore: settingsStore)
         subtitles.settingsProvider = { [unowned settingsStore] in settingsStore.settings }
     }
 
@@ -40,6 +44,7 @@ final class AppModel {
 
     func applicationDidFinishLaunching() {
         overlay.setUp()
+        configureUpdater()
         ChangeObserver.observe({ [settingsStore] in settingsStore.settings.hotkeysEnabled }) { [weak self] enabled in
             self?.configureHotKeys(enabled: enabled)
         }
@@ -92,8 +97,23 @@ final class AppModel {
         }
     }
 
-    func openSettings() {
+    func openSettings(tab: SettingsTab? = nil) {
+        if let tab { settingsTab = tab }
         settingsWindow.show(model: self)
+    }
+
+    // MARK: 在线更新（阶段 11）
+
+    private func configureUpdater() {
+        updater.isSubtitleActive = { [unowned self] in pipeline.isActive || demo.isRunning }
+        updater.prepareForInstall = { [unowned self] in
+            demo.stop()
+            if pipeline.needsShutdown {
+                await pipeline.shutdown(timeout: 2)
+            }
+        }
+        updater.terminate = { [unowned self] in quit() }
+        updater.start()
     }
 
     func exportSubtitles() {
