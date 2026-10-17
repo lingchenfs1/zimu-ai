@@ -230,6 +230,24 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertNotNil(UpdateCheckError.rateLimited(until: now).errorDescription)
     }
 
+    func testRateLimitWaitIsBounded() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let latest = now.addingTimeInterval(UpdatePolicy.maximumRateLimitWait)
+        func limited(_ status: Int, _ headers: [String: String]) -> UpdateCheckError? {
+            UpdateChecker.error(for: HTTPResponseInfo(statusCode: status, contentType: nil, headers: headers), now: now)
+        }
+        XCTAssertEqual(limited(429, ["Retry-After": "86400"]), .rateLimited(until: latest), "很大的 Retry-After 最多等到上限")
+        XCTAssertEqual(limited(429, ["Retry-After": "0"]), .rateLimited(until: now))
+        for bad in ["inf", "nan", "-5", "1e400"] {
+            XCTAssertEqual(limited(429, ["Retry-After": bad]), .rateLimited(until: nil), bad)
+            XCTAssertEqual(limited(403, ["Retry-After": bad]), .http(403), bad)
+        }
+        XCTAssertEqual(limited(403, ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "99999999999"]), .rateLimited(until: latest), "服务器时钟不准时最多等到上限")
+        XCTAssertEqual(limited(403, ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "999400"]), .rateLimited(until: nil), "重置时间已经过去")
+        XCTAssertEqual(limited(403, ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "inf"]), .rateLimited(until: nil))
+        XCTAssertEqual(limited(403, ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "nan"]), .rateLimited(until: nil))
+    }
+
     func testSHA256Digest() {
         XCTAssertEqual(UpdateChecker.sha256(fromDigest: digestA), String(repeating: "ab", count: 32))
         XCTAssertNil(UpdateChecker.sha256(fromDigest: nil))
@@ -249,6 +267,9 @@ final class UpdatePolicyTests: XCTestCase {
         XCTAssertFalse(UpdatePolicy.isAutoCheckDue(now: now, lastSuccessfulCheck: nil, rateLimitedUntil: now.addingTimeInterval(60), enabled: true))
         XCTAssertTrue(UpdatePolicy.isAutoCheckDue(now: now, lastSuccessfulCheck: nil, rateLimitedUntil: now.addingTimeInterval(-1), enabled: true))
         XCTAssertTrue(UpdatePolicy.isAutoCheckDue(now: now, lastSuccessfulCheck: now.addingTimeInterval(3600), rateLimitedUntil: nil, enabled: true), "时钟调回过去也要检查")
+        XCTAssertFalse(UpdatePolicy.isAutoCheckDue(now: now, lastSuccessfulCheck: nil, rateLimitedUntil: now.addingTimeInterval(UpdatePolicy.maximumRateLimitWait), enabled: true))
+        XCTAssertTrue(UpdatePolicy.isAutoCheckDue(now: now, lastSuccessfulCheck: nil, rateLimitedUntil: now.addingTimeInterval(2 * 86_400), enabled: true), "限流时间远超上限（时钟调回过去或响应头异常）时不理会")
+        XCTAssertTrue(UpdatePolicy.isAutoCheckDue(now: now, lastSuccessfulCheck: nil, rateLimitedUntil: .distantFuture, enabled: true))
     }
 
     func testSkippedVersion() {
@@ -347,7 +368,8 @@ final class UpdateInstallSupportTests: XCTestCase {
         XCTAssertEqual(try PendingUpdateMarker.decode(marker.encoded()), marker)
         XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(30)), .succeeded)
         XCTAssertEqual(marker.outcome(runningVersion: "1.4.0", now: created.addingTimeInterval(30)), .notApplied)
-        XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(2 * 86_400)), .stale)
+        XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(2 * 86_400)), .succeeded, "隔了很久才第一次打开新版本也算更新成功")
+        XCTAssertEqual(marker.outcome(runningVersion: "1.4.0", now: created.addingTimeInterval(2 * 86_400)), .stale)
         XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(-3600)), .stale)
     }
 
@@ -471,6 +493,35 @@ final class BundleSwapperTests: XCTestCase {
             XCTAssertEqual(error as? BundleSwapError, .rollbackFailed(previousAt: backup))
         }
         XCTAssertEqual(marker(backup), "old")
+        XCTAssertEqual(marker(staged), "new", "新版本还在暂存位置")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installed))
+    }
+
+    func testRollbackIsRetriedOnce() throws {
+        let installed = try makeApp("ZimuAI.app", marker: "old")
+        let staged = try makeApp("staged.app", marker: "new")
+        let backup = root.appendingPathComponent("backup.app").path
+        let live = BundleSwapOperations.live.rename
+        let recorder = Recorder()
+        let ops = BundleSwapOperations(
+            exchange: { _, _ in ENOTSUP },
+            rename: { from, to in
+                if from == staged { return EIO }
+                if from == backup {
+                    recorder.record(from)
+                    // 第一次放回旧版本失败，第二次成功
+                    if recorder.lock.withLock({ recorder.calls.count }) == 1 { return EBUSY }
+                }
+                return live(from, to)
+            }
+        )
+        XCTAssertThrowsError(try BundleSwapper.swap(installed: installed, staged: staged, backup: backup, operations: ops)) { error in
+            XCTAssertEqual(error as? BundleSwapError, .failed(step: "放入新版本", errno: EIO))
+        }
+        XCTAssertEqual(recorder.calls.count, 2)
+        XCTAssertEqual(marker(installed), "old", "再试一次后旧版本回到原处")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup))
+        XCTAssertEqual(marker(staged), "new")
     }
 }
 
@@ -538,9 +589,13 @@ final class RelaunchScriptTests: XCTestCase {
         return process
     }
 
-    /// 打开命令的替身：把收到的 App 路径写进记录文件
-    private func launcher(record: URL) -> [String] {
-        ["/bin/sh", "-c", #"printf '%s' "$1" > "$0""#, record.path]
+    /// 打开命令的替身：把收到的 App 路径写进记录文件；给了 waitedPid 时，那个进程还在（没等它退出就打开了 App）就写 "alive"
+    private func launcher(record: URL, waitedPid: Int32? = nil) -> [String] {
+        guard let waitedPid else {
+            return ["/bin/sh", "-c", #"printf '%s' "$1" > "$0""#, record.path]
+        }
+        // $0 记录文件，$1 进程号，$2 App 路径；脚本在 kill -0 失败（进程已被回收）后才打开 App，僵尸进程不会被误判为还在
+        return ["/bin/sh", "-c", #"if kill -0 "$1" 2>/dev/null; then echo alive > "$0"; else printf '%s' "$2" > "$0"; fi"#, record.path, String(waitedPid)]
     }
 
     private func makeApp(_ name: String) throws -> URL {
@@ -556,12 +611,13 @@ final class RelaunchScriptTests: XCTestCase {
         let start = Date()
         let result = try await ProcessRunner.run(
             "/bin/sh",
-            UpdateScripts.relaunchArguments(pid: child.processIdentifier, appPath: app.path, timeoutSeconds: 10, launcher: launcher(record: record)),
+            UpdateScripts.relaunchArguments(pid: child.processIdentifier, appPath: app.path, timeoutSeconds: 10, launcher: launcher(record: record, waitedPid: child.processIdentifier)),
             timeout: 20
         )
         XCTAssertEqual(result.status, 0, result.stdoutText + result.stderrText)
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.5, "要等旧进程退出")
-        XCTAssertEqual(try String(contentsOf: record, encoding: .utf8), app.path)
+        // 替身打开 App 时旧进程还在的话记录的是 "alive"
+        XCTAssertEqual(try String(contentsOf: record, encoding: .utf8), app.path, "要等旧进程退出后再打开")
         XCTAssertTrue(result.stdoutText.contains("launching"))
         XCTAssertTrue(result.stdoutText.contains("done"))
     }

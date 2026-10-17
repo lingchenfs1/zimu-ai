@@ -230,17 +230,24 @@ public struct UpdateChecker: Sendable {
         return decoder
     }()
 
-    /// 把非 2xx 响应转成错误；限流时根据 x-ratelimit-reset / retry-after 给出可再次检查的时间
+    /// 把非 2xx 响应转成错误；限流时根据 x-ratelimit-reset / retry-after 给出可再次检查的时间，
+    /// 最多到 now + UpdatePolicy.maximumRateLimitWait（异常的响应头或不准的服务器时钟不能让自动检查停太久）
     static func error(for info: HTTPResponseInfo, now: Date) -> UpdateCheckError? {
         guard !info.isSuccess else { return nil }
         switch info.statusCode {
         case 403, 429:
-            if let retryAfter = info.header("retry-after").flatMap(TimeInterval.init) {
-                return .rateLimited(until: now.addingTimeInterval(retryAfter))
+            let latest = now.addingTimeInterval(UpdatePolicy.maximumRateLimitWait)
+            // 只接受有限的非负秒数（TimeInterval.init 也会解析出 inf、nan 和负数）
+            if let retryAfter = info.header("retry-after").flatMap(TimeInterval.init), retryAfter.isFinite, retryAfter >= 0 {
+                return .rateLimited(until: min(now.addingTimeInterval(retryAfter), latest))
             }
             if info.header("x-ratelimit-remaining") == "0" {
-                let reset = info.header("x-ratelimit-reset").flatMap(TimeInterval.init).map { Date(timeIntervalSince1970: $0) }
-                return .rateLimited(until: reset)
+                guard let seconds = info.header("x-ratelimit-reset").flatMap(TimeInterval.init), seconds.isFinite else {
+                    return .rateLimited(until: nil)
+                }
+                // 重置时间按服务器时钟给出；已经过去（本机时钟偏快）时不知道还要等多久
+                let reset = Date(timeIntervalSince1970: seconds)
+                return .rateLimited(until: reset > now ? min(reset, latest) : nil)
             }
             return info.statusCode == 429 ? .rateLimited(until: nil) : .http(403)
         case 404:

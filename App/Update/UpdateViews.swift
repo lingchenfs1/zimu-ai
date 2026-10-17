@@ -98,7 +98,8 @@ struct UpdateBanner: View {
         case .available, .downloading, .preparing, .awaitingConfirmation, .installing:
             return true
         case .failed(let info, _):
-            return info != nil
+            // 没有新版本信息时 body 走 default，显示「已更新到 vX」
+            return info != nil || updater.justUpdatedTo != nil
         default:
             return updater.justUpdatedTo != nil
         }

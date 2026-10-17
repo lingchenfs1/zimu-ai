@@ -8,6 +8,9 @@ public enum UpdatePolicy {
     public static let launchDelay: TimeInterval = 10
     /// 更新包大小上限
     public static let maximumAssetSize: Int64 = 512 * 1024 * 1024
+    /// 限流时最多暂停自动检查多久：GitHub 未登录的限流 1 小时内就会重置，
+    /// 更远的时间只可能来自异常的响应头、不准的服务器时钟或被调回过去的本机时钟
+    public static let maximumRateLimitWait: TimeInterval = 3600
 
     /// 现在是否应该自动检查：已开启、不在限流期内、距上次成功检查已满间隔
     public static func isAutoCheckDue(
@@ -18,7 +21,8 @@ public enum UpdatePolicy {
         interval: TimeInterval = autoCheckInterval
     ) -> Bool {
         guard enabled else { return false }
-        if let until = rateLimitedUntil, now < until { return false }
+        // 限流结束时间远超上限时不再理会（留 1 分钟余量）
+        if let until = rateLimitedUntil, now < until, until.timeIntervalSince(now) <= maximumRateLimitWait + 60 { return false }
         guard let last = lastSuccessfulCheck else { return true }
         // 时钟被调回过去时也要检查
         return now.timeIntervalSince(last) >= interval || now < last

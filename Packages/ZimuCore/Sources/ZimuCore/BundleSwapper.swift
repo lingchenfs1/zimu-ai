@@ -44,7 +44,7 @@ public enum BundleSwapError: Error, Equatable, LocalizedError {
     /// 新旧 App 不在同一个卷上，无法原子替换
     case crossVolume
     case failed(step: String, errno: Int32)
-    /// 安装失败且没能把旧版本放回原处
+    /// 安装失败且没能把旧版本放回原处：安装位置上没有 App，旧版本在 previousAt，新版本还在暂存位置（调用方不能删除这两个位置）
     case rollbackFailed(previousAt: String)
 
     public var errorDescription: String? {
@@ -94,7 +94,8 @@ public enum BundleSwapper {
         }
         let moveNew = operations.rename(staged, installed)
         guard moveNew == 0 else {
-            guard operations.rename(backup, installed) == 0 else {
+            // 把旧版本放回去；失败时再试一次（安装位置上不能没有 App）
+            guard operations.rename(backup, installed) == 0 || operations.rename(backup, installed) == 0 else {
                 throw BundleSwapError.rollbackFailed(previousAt: backup)
             }
             throw error(for: moveNew, step: "放入新版本")

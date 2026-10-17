@@ -24,21 +24,20 @@ jobs:
   build:
     runs-on: macos-26
     env:
-      # 可选：配置这些 Secrets 后使用 Developer ID 签名并公证
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
-      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
-      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
-      NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
-      # 软件内更新（决策 D21 / D22）：公开发布仓库的 token、自签名证书的 SHA-1（仓库变量）
-      RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+      # 机密（证书、token、公证密码）不放在 job 级，只交给用到它的步骤。
+      # 步骤的 if: 里不能直接用 secrets，这里只放「是否配置了」（值是字符串 true / false）
+      HAS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      HAS_RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN != '' }}
+      # 软件内更新（决策 D21 / D22）：公开发布仓库、自签名证书的 SHA-1（仓库变量）
       RELEASES_REPOSITORY: lingchenfs1/zimu-ai-releases
       CODESIGN_IDENTITY_SHA1: ${{ vars.CODESIGN_IDENTITY_SHA1 }}
       IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v')) }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # 之后的步骤不需要带凭据操作 git，不把 GITHUB_TOKEN 留在 .git/config 里
+          persist-credentials: false
 
       - name: Show toolchain
         run: |
@@ -70,13 +69,16 @@ jobs:
 
       - name: Upload build log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: xcodebuild-log
           path: build/xcodebuild.log
 
       - name: Import signing certificate
-        if: env.MACOS_CERTIFICATE != ''
+        if: env.HAS_CERT == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           # 证书可以是 Developer ID，也可以是自签名的「代码签名」证书（决策 D22）。
           # 自签名证书不受信任也能签名：按 SHA-1 指定身份，并把临时钥匙串加入搜索列表。
@@ -84,7 +86,7 @@ jobs:
           KCPW="$(uuidgen)"
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p "$KCPW" "$KC"
-          security set-keychain-settings -lut 21600 "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
           security unlock-keychain -p "$KCPW" "$KC"
           security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERTIFICATE_PASSWORD" -f pkcs12 -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC"
@@ -104,6 +106,9 @@ jobs:
 
       - name: Check release prerequisites
         if: env.IS_RELEASE == 'true'
+        env:
+          # 只在这一步用来验证 token，不交给其他步骤
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           APP="build/DerivedData/Build/Products/Release/ZimuAI.app"
           VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
@@ -111,21 +116,49 @@ jobs:
             echo "::error::发布标签 $RELEASE_TAG 与版本号 v$VERSION 不一致"; exit 1
           fi
           # 已经启用固定签名后，不能再发布 ad-hoc 版本，否则已安装的用户无法通过同一签名校验
-          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ -z "$MACOS_CERTIFICATE" ]; then
+          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ "$HAS_CERT" != "true" ]; then
             echo "::error::设置了 CODESIGN_IDENTITY_SHA1，但没有配置证书（MACOS_CERTIFICATE）"; exit 1
           fi
-          if [ -z "$MACOS_CERTIFICATE" ]; then
+          if [ "$HAS_CERT" != "true" ]; then
             echo "::warning::没有配置签名证书，本次发布使用 ad-hoc 签名（更新后系统音频权限需要重新允许）"
           fi
-          if [ -z "$RELEASES_TOKEN" ]; then
+          # 已经启用软件内更新（设置了证书指纹）后，不发布到公开仓库，已安装的用户就收不到这个版本
+          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ "$HAS_RELEASES_TOKEN" != "true" ]; then
+            echo "::error::设置了 CODESIGN_IDENTITY_SHA1，但没有配置 RELEASES_TOKEN，不能发布到公开仓库 $RELEASES_REPOSITORY"; exit 1
+          fi
+          if [ "$HAS_RELEASES_TOKEN" != "true" ]; then
             echo "::warning::没有配置 RELEASES_TOKEN，不会发布到公开仓库 $RELEASES_REPOSITORY，软件内更新检测不到这个版本"
+          fi
+          # 在任何发布步骤之前确认 token 有效（未过期、未撤销），避免主仓库已经发布、公开仓库才失败。
+          # 公开仓库任何有效 token 都能读取，这里确认不了写权限（按 README 授予 Contents: Read and write）
+          if [ "$HAS_RELEASES_TOKEN" = "true" ] && ! curl -fsS --retry 3 --max-time 30 -o /dev/null \
+            -H "Authorization: Bearer $RELEASES_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$RELEASES_REPOSITORY"; then
+            echo "::error::无法用 RELEASES_TOKEN 访问发布仓库 $RELEASES_REPOSITORY（上面是 401：token 无效或已过期，请在 Secrets 里更新后重新运行；404：仓库不存在；其他错误多半是网络问题，直接重新运行即可）"; exit 1
           fi
 
       - name: Package DMG
+        env:
+          # 可选：配置这些 Secrets 后使用 Developer ID 签名并公证（见 scripts/package_dmg.sh）
+          DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
         run: scripts/package_dmg.sh
 
+      # 签名用完立即删除临时钥匙串（失败、取消时也执行），之后的上传、发布步骤都用不到证书
+      - name: Delete signing keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/cert.p12"
+          KC="$RUNNER_TEMP/zimu-signing.keychain-db"
+          # delete-keychain 会同时把它移出钥匙串搜索列表（恢复导入前的列表）
+          if [ -f "$KC" ]; then security delete-keychain "$KC"; fi
+          security list-keychains -d user
+
       - name: Upload DMG
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ZimuAI-dmg
           path: |
@@ -144,7 +177,7 @@ jobs:
 
       - name: Publish release
         if: env.IS_RELEASE == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
@@ -158,8 +191,8 @@ jobs:
       # 软件内更新读取的公开发布仓库（主仓库是私有的，决策 D21）。
       # 不传 target_commitish：这个提交不在发布仓库里，标签建在发布仓库的默认分支上
       - name: Publish to public releases repository
-        if: env.IS_RELEASE == 'true' && env.RELEASES_TOKEN != ''
-        uses: softprops/action-gh-release@v2
+        if: env.IS_RELEASE == 'true' && env.HAS_RELEASES_TOKEN == 'true'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           repository: ${{ env.RELEASES_REPOSITORY }}
           token: ${{ secrets.RELEASES_TOKEN }}

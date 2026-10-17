@@ -64,10 +64,18 @@ final class UpdateDownloader: NSObject, URLSessionDownloadDelegate, @unchecked S
                 var request = URLRequest(url: asset.url)
                 request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
                 let task = session.downloadTask(with: request)
-                lock.withLock {
+                // 开始下载前就按了「取消」时不再下载（检查和保存放在同一次加锁里，不会漏掉）
+                let earlyFailure = lock.withLock { () -> Error? in
+                    if let stored = self.failure { return stored }
                     self.continuation = continuation
                     self.session = session
                     self.task = task
+                    return nil
+                }
+                if let earlyFailure {
+                    session.invalidateAndCancel()
+                    continuation.resume(throwing: earlyFailure)
+                    return
                 }
                 task.resume()
             }
@@ -75,10 +83,14 @@ final class UpdateDownloader: NSObject, URLSessionDownloadDelegate, @unchecked S
             self.cancel()
         }
 
+        // 下载完成后、校验时也可能按了「取消」：取消时删除文件，不再继续
         do {
+            if isCancelled { throw UpdateDownloadError.cancelled }
             try await Self.verify(file: downloaded, size: asset.size, sha256: asset.sha256)
+            if isCancelled { throw UpdateDownloadError.cancelled }
         } catch {
             try? FileManager.default.removeItem(at: downloaded)
+            if isCancelled { throw UpdateDownloadError.cancelled }
             throw error
         }
         return downloaded
@@ -89,6 +101,14 @@ final class UpdateDownloader: NSObject, URLSessionDownloadDelegate, @unchecked S
             if failure == nil { failure = UpdateDownloadError.cancelled }
             return task
         }?.cancel()
+    }
+
+    /// 是否已经按了「取消」（下载完成后、校验时按的也算）
+    var isCancelled: Bool {
+        lock.withLock { () -> Bool in
+            if case .cancelled? = failure as? UpdateDownloadError { return true }
+            return false
+        }
     }
 
     /// 在后台线程分块计算 SHA-256
@@ -148,6 +168,8 @@ final class UpdateDownloader: NSObject, URLSessionDownloadDelegate, @unchecked S
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // 已经取消或出错时不采用这个文件，由 didCompleteWithError 带上原因结束
+        if lock.withLock({ failure }) != nil { return }
         // 必须在这个回调返回前把临时文件移走
         if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             lock.withLock { failure = failure ?? UpdateDownloadError.http(http.statusCode) }

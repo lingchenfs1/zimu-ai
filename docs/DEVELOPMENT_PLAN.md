@@ -185,11 +185,11 @@ zimu-ai/
 ### 阶段 11：软件内在线更新（2026-10-15）
 > 需求：软件内在线更新。用户确认：启动时和每天自动检查，提示后一键下载、安装并自动重启；可关闭自动检查、可跳过版本；直连 GitHub；自研更新器；源码仓库保持私有，新建公开发布仓库；用自签名证书固定签名身份。
 
-- [ ] 11.1 发布源与签名：CI 按证书 SHA-1 自签名（未受信任证书、临时钥匙串加入搜索列表、`--timestamp=none`、不再 `--deep`）；额外生成 zip；发布前校验 tag 与版本、配置了证书指纹却没有证书时发布失败；同时发布到公开仓库 `lingchenfs1/zimu-ai-releases`；手动发布不再被推送取消
-- [ ] 11.2 检查更新（ZimuCore）：版本比较、Release 列表解析与资产选择（zip + sha256 digest）、限流与错误提示、自动检查策略与跳过版本、下载地址白名单、暂存 App 校验、更新标记、原子交换、重启脚本 + 单元测试
+- [ ] 11.1 发布源与签名（代码已完成；自签名与跨仓库发布要等用户完成一次性配置后，由首次发布验证）：CI 按证书 SHA-1 自签名（未受信任证书、临时钥匙串加入搜索列表、`--timestamp=none`、不再 `--deep`）；额外生成 zip；发布前校验 tag 与版本、配置了证书指纹却没有证书或 `RELEASES_TOKEN` 时发布失败、在任何发布步骤之前验证 token 有效；机密只交给用到它的步骤、Action 固定到提交 SHA、打包后删除临时钥匙串；同时发布到公开仓库 `lingchenfs1/zimu-ai-releases`；手动发布不再被推送取消
+- [x] 11.2 检查更新（ZimuCore）：版本比较、Release 列表解析与资产选择（zip + sha256 digest）、限流与错误提示、自动检查策略与跳过版本、下载地址白名单、暂存 App 校验、更新标记、原子交换、重启脚本 + 单元测试
 - [ ] 11.3 下载与安装：下载进度与重定向白名单、SHA-256 校验、解压暂存、Bundle ID / 版本 / 最低系统 / 代码签名（同一签名）校验、运行中原子交换、重启；位置不可安装时给出指引（待用户实测）
 - [ ] 11.4 界面：菜单栏面板更新提示与进度；设置「软件更新」区（自动检查开关、检查更新、更新说明、下载并安装、跳过这个版本、查看发布页面）（待用户实测）
-- [ ] 11.5 文档：README「在线更新」（使用 + 维护者一次性配置：发布仓库、token、自签名证书、Secrets / 变量）、发布说明
+- [x] 11.5 文档：README「在线更新」（使用 + 维护者一次性配置：发布仓库、token、自签名证书、Secrets / 变量）、发布说明
 - [ ] 11.6 用户完成一次性配置后发布 v1.4.0（发布到两个仓库）
 
 **验收**：手动安装 v1.4.0 后，发布 v1.4.1，软件内能检查、下载、安装并自动重启到 v1.4.1；音频权限保留（自签名后预期保留）；跳过版本、关闭自动检查、在 DMG 中运行时的拒绝提示都正常。
@@ -220,6 +220,8 @@ zimu-ai/
 - ad-hoc 签名每次构建身份都不同（DR 是 cdhash）：系统音频权限、钥匙串授权都会被当成新 App。自签名证书固定 DR（`certificate leaf = H"…"`），TCC 预计可保留；但钥匙串分区列表对没有 Team ID 的 App 仍按 cdhash 记录，每次更新后读取 API Key 仍会弹一次。
 - codesign 可以用未受信任的自签名证书签名：用 SHA-1 指定身份、临时钥匙串要 `list-keychains` 加入搜索列表并 `set-key-partition-list`；不要 `add-trusted-cert`（需要交互式管理员授权）。
 - 跨仓库发布 Release 不能带 `target_commitish`（提交不在目标仓库里），目标仓库要先有一个提交；GitHub 的 latest 按 created_at 排序，软件端自己取最高版本号。
+- GitHub Actions 步骤的 `if:` 里不能直接用 `secrets`：在 job 级 env 里转成布尔值（`HAS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}`，值是字符串 `'true'`）再判断；机密本身只放在用到它的步骤的 `env` / `with` 里，第三方 Action 固定到完整提交 SHA。
+- 发布前只能确认 `RELEASES_TOKEN` 有效（`GET /repos/…` 返回 200），确认不了写权限（响应里的 `permissions` 反映的是用户角色，不是 token 的授权）：token 有效但没有 Contents 写权限时，仍会出现主仓库已发布、公开仓库失败的情况，按 README 授予 **Contents: Read and write**。
 - `browser_download_url` 会 302 到 `release-assets.githubusercontent.com`；Info.plist 开了 `NSAllowsArbitraryLoads`，更新下载必须自己限定 https 与主机白名单。
 - 浏览器的声音通常来自子进程（如 `com.google.Chrome.helper`、Safari 的 `com.apple.WebKit.GPU`），指定应用捕获时按 bundle ID 前缀匹配；Safari 请在列表中选择 WebKit 进程或直接用「全部系统音频」。
 
@@ -234,6 +236,7 @@ zimu-ai/
 | D5 | 2026-09-27 | XcodeGen + ZimuCore 本地包 + GitHub Actions macos-26 | 工程文件纯文本易维护；纯逻辑可测试；云端容器无法编译 macOS 代码 |
 | D6 | 2026-09-27 | App target 使用 Swift 5 语言模式（Swift 6.2 编译器），ZimuCore 保持 Swift 6 严格并发 | 云端容器无法本地编译，Swift 6 模式的并发报错只能靠 CI 反复试；且 Swift 6 模式会对音频回调等 C 回调插入运行时隔离断言，容易在音频线程崩溃。平台代码自行保证线程安全（音频类标注 nonisolated / 专用队列） |
 | D7 | 2026-09-27 | `TranscriptionEngine` 协议放在 App 层（依赖 AVAudioPCMBuffer），`TranscriptEvent` 等数据类型放 ZimuCore；`TranslationEngine` 协议放 ZimuCore | 识别引擎输入是 AVFoundation 类型，ZimuCore 保持不依赖 Apple 专有框架 |
+| D23 | 2026-10-17 | 审查后加固在线更新：CI 机密只交给用到它的步骤（job 级只放 `HAS_CERT` / `HAS_RELEASES_TOKEN` 布尔值），Action 固定到完整提交 SHA，打包后删除临时钥匙串；配置了证书指纹变量后，没有 `RELEASES_TOKEN` 的发布也直接失败，并在任何发布步骤之前验证 token 有效；安装前重新校验暂存的新版本，签名校验放到后台线程；旧版本没能放回原处时保留暂存目录（重试一次放回）；App 旁边的后备暂存目录记在 UserDefaults 里，启动时只清理记录过的 | 自签名证书是软件内更新唯一的信任根，`RELEASES_TOKEN` 能写更新渠道，不能让无关步骤和可变标签的第三方 Action 读到；避免只发到私有仓库、或主仓库已发布而公开仓库才失败；等待确认安装可能长达数小时，暂存目录用户可写；不能在任何失败路径上删掉仅有的副本；列出桌面、外接磁盘等位置会触发系统访问提示 |
 | D22 | 2026-10-15 | CI 用自签名代码签名证书（按 SHA-1 指定、`--timestamp=none`、不公证、保留 Hardened Runtime、不用 `--deep`）；证书有效期 10 年以上并离线备份；配置了证书指纹变量后，没有证书的发布直接失败 | 固定签名身份，系统音频权限预计可在更新后保留，更新器可校验同一签名；没有付费开发者账号也能做到。钥匙串每次更新弹一次授权是已知限制（无 Team ID） |
 | D21 | 2026-10-15 | 自研在线更新：从公开发布仓库 `lingchenfs1/zimu-ai-releases` 的 Release 列表取最高版本；下载 zip 资产，校验大小与 GitHub sha256 digest，下载与重定向只允许 GitHub 发布地址；解压暂存后校验 Bundle ID、版本、最低系统和代码签名（当前不是 ad-hoc 时要求满足当前 App 的 DR）；在软件仍运行时用 `renamex_np(RENAME_SWAP)` 原子交换，再由小脚本等待退出后重启 | 源码仓库私有；Sparkle 需要额外 EdDSA 密钥并关闭库验证；运行中交换没有「App 不见了」的窗口，失败时软件还在、能给出手动安装的指引；zip 比挂载 DMG 简单可靠 |
 | D20 | 2026-09-29 | AI 校对识别文字：只在 OpenAI 兼容翻译的主目标语言整句请求中进行，输出 `<source>…</source><translation>…</translation>`；校正结果与识别结果的归一化编辑距离超过 50% 或为空时不采用 | 不增加请求次数；防止模型改写、润色或胡编原文 |
@@ -275,3 +278,5 @@ zimu-ai/
 - 2026-09-29 | 10.1–10.5 | 思维链：新增 ReasoningFilter（成对推理标签、只有结束标签、gpt-oss 格式、「译文：」前缀）和 StreamingTranslationFilter（推理结束前不显示，见过推理后按会话记住）；ThinkingControl 按服务自动关闭思考，用户参数优先，HTTP 400 去掉自动参数重试；重写翻译提示词（语音识别原文、只输出译文、不回答问句、目标语言风格）+ 翻译场景 + 术语表 + 提示词预览；识别模式（准确优先去掉 fastResults）、断句放宽并在停顿处切、专有名词、纠错替换（TextCorrections）；AI 校对（<source>/<translation> 输出、差异阈值 50%、updateOriginal）；版本号 1.3.0 (4) | 本地 macOS 26.5 SDK 类型检查零错误零警告；Linux 上 ZimuCore 109 个测试通过 | 待用户实测
 - 2026-09-30 | 1.4 / 10.6 | 用户实测 v1.2.0 已确认缩放正常，勾选 1.4；用户确认后合并 PR lingchenfs1/zimu-ai#5 并通过 CI 手动发布 v1.3.0（Release 附 ZimuAI-1.3.0.dmg） | CI；Release 页面 | 10.1–10.5 待用户实测
 - 2026-10-15 | 11 | 需求：软件内在线更新。调研 Sparkle 与自研方案、核实主仓库为私有；与用户确认：自研更新器 + 公开发布仓库 + 自签名证书；新增阶段 11 与决策 D21、D22 | 调研、设计审查 | 待开发
+- 2026-10-15 | 11.1–11.5 | 实现软件内在线更新：ZimuCore 新增 SemanticVersion、UpdateChecker（GitHub Release 列表、zip 资产与 sha256 digest、限流）、UpdatePolicy（自动检查、跳过版本、下载地址白名单）、BundleInfo / StagedBundleValidator / InstallLocationCheck / PendingUpdateMarker、BundleSwapper（RENAME_SWAP 与两次改名后备）、ProcessRunner、重启脚本；App 新增 CodeSignature、UpdateDownloader、UpdateInstaller、AppUpdater 与菜单栏 / 设置界面；CI 按证书 SHA-1 自签名、生成 zip、发布到公开仓库；README 与 v1.4.0 发布说明；版本 1.4.0 (5) | Linux `swift test` 141 个通过；macOS 26.5 SDK 类型检查零错误零警告 | 界面、权限与安装待用户实测；需要用户完成一次性配置
+- 2026-10-17 | 11（审查） | 多视角对抗式审查（安全 / 安装 / 并发 / CI / 核心 5 个视角，每条发现再由 2 个验证者复核）确认 13 个问题，按设计工作流（4 组设计 + 4 组反驳）全部修复：回滚失败不再删除仅有的副本（并重试一次放回）、安装前重新校验、签名校验移出主线程、暂存目录泄漏、下载完成后取消无效、「稍后」注释、手动检查失败丢失新版本、横幅可见性、CI 机密范围 / Action 固定 SHA / 删除钥匙串、token 缺失或失效时发布前失败、标记超过 24 小时误判、限流时间无上限、重启脚本测试可能误通过；新增决策 D23 | Linux `swift test` 143 个全部通过（重启脚本测试连跑 3 次稳定；去掉等待循环后测试能发现）；macOS 26.5 SDK 类型检查 ZimuCore / App 零错误零警告；workflow YAML 解析与每个 run 块 `bash -n` 通过 | 回滚失败、取消、等待确认时退出、更新后提示与开机启动待用户实测；11.1 待一次性配置后首次发布验证

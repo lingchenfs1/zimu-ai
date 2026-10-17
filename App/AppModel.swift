@@ -52,6 +52,8 @@ final class AppModel {
 
     func applicationWillTerminate() {
         HotKeyCenter.shared.unregisterAll()
+        // 等待确认安装时退出：删除暂存的新版本
+        updater.discardPreparedUpdate()
     }
 
     // MARK: 退出（阶段 8.2）

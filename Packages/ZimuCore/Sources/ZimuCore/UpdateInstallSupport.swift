@@ -145,20 +145,22 @@ public struct PendingUpdateMarker: Codable, Sendable, Equatable {
         case succeeded
         /// 运行的不是新版本（更新没有生效）
         case notApplied
-        /// 标记太旧，直接清理
+        /// 没有运行新版本且标记太旧，或标记时间不对，直接清理
         case stale
     }
 
     public static let staleInterval: TimeInterval = 86_400
 
     public func outcome(runningVersion: String, now: Date) -> Outcome {
-        if now.timeIntervalSince(createdAt) > Self.staleInterval || now < createdAt.addingTimeInterval(-60) {
+        // 标记时间在未来：时钟被调过，标记不可信
+        if now < createdAt.addingTimeInterval(-60) {
             return .stale
         }
-        guard let running = SemanticVersion(runningVersion), let target = SemanticVersion(toVersion) else {
-            return .notApplied
+        // 已经运行新版本说明替换生效了，隔多久才第一次打开都算成功
+        if let running = SemanticVersion(runningVersion), let target = SemanticVersion(toVersion), running == target {
+            return .succeeded
         }
-        return running == target ? .succeeded : .notApplied
+        return now.timeIntervalSince(createdAt) > Self.staleInterval ? .stale : .notApplied
     }
 
     public func encoded() throws -> Data {

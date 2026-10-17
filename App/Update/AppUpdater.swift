@@ -161,10 +161,10 @@ final class AppUpdater {
             } catch {
                 guard let self, !(error is CancellationError) else { return }
                 if case UpdateCheckError.rateLimited(let until) = error {
-                    UserDefaults.standard.set(until ?? Date().addingTimeInterval(3600), forKey: Self.rateLimitKey)
+                    UserDefaults.standard.set(until ?? Date().addingTimeInterval(UpdatePolicy.maximumRateLimitWait), forKey: Self.rateLimitKey)
                 }
-                // 自动检查失败不打扰用户
-                self.phase = manual ? .failed(nil, message: error.localizedDescription) : (previous.isBusy ? .idle : previous)
+                // 自动检查失败不打扰用户；手动检查失败时保留已经发现的新版本
+                self.phase = manual ? .failed(previous.info, message: error.localizedDescription) : (previous.isBusy ? .idle : previous)
             }
         }
     }
@@ -199,6 +199,11 @@ final class AppUpdater {
                 let archive = try await downloader.start()
                 guard let self else { return }
                 self.downloader = nil
+                // 下载刚结束、回到主线程之前按的「取消」也要生效
+                if downloader.isCancelled {
+                    try? FileManager.default.removeItem(at: archive)
+                    throw UpdateDownloadError.cancelled
+                }
                 self.phase = .preparing(info)
                 let prepared = try await self.installer.prepare(archive: archive, info: info)
                 self.prepared = prepared
@@ -229,7 +234,7 @@ final class AppUpdater {
         }
     }
 
-    /// 暂不安装：保留已校验的新版本，稍后在提示里继续
+    /// 暂不安装：删除已解压的新版本，回到「发现新版本」提示（之后再更新会重新下载）
     func postponeInstall() {
         guard case .awaitingConfirmation(let info) = phase else { return }
         phase = .available(info)
@@ -237,6 +242,14 @@ final class AppUpdater {
             UpdateInstaller.removeStagingRoot(prepared.stagingRoot, installedApp: installer.installedApp)
             self.prepared = nil
         }
+    }
+
+    /// 退出软件时调用：删除还没安装的新版本。正在安装时不动：替换后暂存目录里是旧版本，由新版本启动时按标记清理
+    func discardPreparedUpdate() {
+        guard let prepared else { return }
+        if case .installing = phase { return }
+        UpdateInstaller.removeStagingRoot(prepared.stagingRoot, installedApp: installer.installedApp)
+        self.prepared = nil
     }
 
     func cancelDownload() {
@@ -276,7 +289,7 @@ final class AppUpdater {
         await prepareForInstall()
         let relaunchScheduled: Bool
         do {
-            relaunchScheduled = try installer.install(prepared, launchAtLoginEnabled: LaunchAtLogin.isEnabled)
+            relaunchScheduled = try await installer.install(prepared, launchAtLoginEnabled: LaunchAtLogin.isEnabled)
         } catch {
             self.prepared = nil
             phase = .failed(info, message: error.localizedDescription)

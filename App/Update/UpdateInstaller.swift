@@ -67,6 +67,9 @@ final class UpdateInstaller {
         supportDirectory.appendingPathComponent("pending-update.json")
     }
 
+    /// 用过的后备暂存目录（在 App 旁边而不是临时文件夹里，系统不会清理）
+    private static let fallbackRootsKey = "zimu.update.fallbackStagingRoots"
+
     /// 当前位置能否原地更新
     func locationProblem() -> InstallLocationProblem? {
         let values = try? installedApp.resourceValues(forKeys: [.volumeIsReadOnlyKey])
@@ -109,7 +112,7 @@ final class UpdateInstaller {
             try? FileManager.default.removeItem(at: extracted)
             try? FileManager.default.removeItem(at: archive)
 
-            try validate(staged: staged, info: info)
+            try await validate(staged: staged, info: info)
 
             // 自己下载的文件没有隔离属性，这里再保险地去掉一次
             _ = try? await ProcessRunner.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", staged.path], timeout: 60)
@@ -120,7 +123,7 @@ final class UpdateInstaller {
         }
     }
 
-    private func validate(staged: URL, info: UpdateInfo) throws {
+    private func validate(staged: URL, info: UpdateInfo) async throws {
         let bundle: BundleInfo
         do {
             bundle = try BundleInfo(plistData: Data(contentsOf: staged.appendingPathComponent("Contents/Info.plist")))
@@ -141,9 +144,12 @@ final class UpdateInstaller {
         }
         guard problems.isEmpty else { throw UpdateInstallError.invalidBundle(problems) }
 
-        // 当前 App 用固定证书签名时，新版本必须满足当前 App 的指定要求（同一签名）；ad-hoc 时只能校验完整性
+        // 当前 App 用固定证书签名时，新版本必须满足当前 App 的指定要求（同一签名）；ad-hoc 时只能校验完整性。
+        // 严格校验要读完整个 App 包，放到后台线程，免得卡住字幕和菜单
         let requirement = verifiesSameSigner ? runningIdentity?.designatedRequirement : nil
-        try CodeSignature.validate(bundle: staged, satisfying: requirement)
+        try await Task.detached(priority: .userInitiated) {
+            try CodeSignature.validate(bundle: staged, satisfying: requirement)
+        }.value
     }
 
     /// 与安装位置在同一个卷上的暂存目录（原子替换需要同卷）
@@ -156,6 +162,9 @@ final class UpdateInstaller {
         }
         let fallback = parent.appendingPathComponent(".ZimuAI-update-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: fallback, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        // 记下来，万一遗留（例如等待确认安装时崩溃），下次启动时删除
+        let defaults = UserDefaults.standard
+        defaults.set((defaults.stringArray(forKey: Self.fallbackRootsKey) ?? []) + [fallback.path], forKey: Self.fallbackRootsKey)
         return fallback
     }
 
@@ -170,8 +179,9 @@ final class UpdateInstaller {
     // MARK: 安装
 
     /// 在软件仍在运行时替换 App，然后安排重启。返回是否成功安排了重启（失败时需要用户手动打开）。
-    /// 替换失败时抛出错误，此时什么都没有改变。
-    func install(_ prepared: Prepared, launchAtLoginEnabled: Bool) throws -> Bool {
+    /// 替换前重新校验暂存的新版本。失败时抛出错误：原来的 App 不变，暂存目录已删除；
+    /// 只有旧版本没能放回原处时（BundleSwapError.rollbackFailed）安装位置上没有 App，这时保留暂存目录（新旧两个版本都在里面）。
+    func install(_ prepared: Prepared, launchAtLoginEnabled: Bool) async throws -> Bool {
         let backup = prepared.stagingRoot.appendingPathComponent("previous-" + installedApp.lastPathComponent, isDirectory: true)
         let marker = PendingUpdateMarker(
             fromVersion: currentVersion.description,
@@ -182,15 +192,28 @@ final class UpdateInstaller {
             launchAtLoginWasEnabled: launchAtLoginEnabled,
             createdAt: Date()
         )
-        try FileManager.default.createDirectory(at: Self.supportDirectory, withIntermediateDirectories: true)
-        try marker.encoded().write(to: Self.markerFile, options: .atomic)
+        do {
+            // 等待确认期间新版本一直放在用户可写的暂存目录里，替换前再校验一次
+            try await validate(staged: prepared.stagedApp, info: prepared.info)
+            try FileManager.default.createDirectory(at: Self.supportDirectory, withIntermediateDirectories: true)
+            try marker.encoded().write(to: Self.markerFile, options: .atomic)
+        } catch {
+            Self.removeStagingRoot(prepared.stagingRoot, installedApp: installedApp)
+            Self.log("install aborted: \(error)")
+            throw error
+        }
 
         do {
             try BundleSwapper.swap(installed: installedApp.path, staged: prepared.stagedApp.path, backup: backup.path)
         } catch {
             try? FileManager.default.removeItem(at: Self.markerFile)
-            Self.removeStagingRoot(prepared.stagingRoot, installedApp: installedApp)
-            Self.log("swap failed: \(error)")
+            if case .rollbackFailed = error as? BundleSwapError {
+                // 安装位置上已经没有 App：暂存目录里是新旧两个版本仅有的副本，不能删除
+                Self.log("swap failed, old version at \(backup.path), new version at \(prepared.stagedApp.path): \(error)")
+            } else {
+                Self.removeStagingRoot(prepared.stagingRoot, installedApp: installedApp)
+                Self.log("swap failed: \(error)")
+            }
             throw error
         }
         Self.log("installed \(prepared.info.versionString) at \(installedApp.path)")
@@ -218,7 +241,10 @@ final class UpdateInstaller {
 
     /// 启动时调用：处理上次更新留下的标记，清理旧版本、暂存目录和下载缓存
     static func handlePendingUpdate(installedApp: URL, runningVersion: String) -> PostUpdateResult? {
-        defer { try? FileManager.default.removeItem(at: downloadDirectory) }
+        defer {
+            try? FileManager.default.removeItem(at: downloadDirectory)
+            removeLeftoverFallbackRoots(installedApp: installedApp)
+        }
         guard let data = try? Data(contentsOf: markerFile) else { return nil }
         try? FileManager.default.removeItem(at: markerFile)
         guard let marker = try? PendingUpdateMarker.decode(data) else { return nil }
@@ -233,14 +259,45 @@ final class UpdateInstaller {
         }
     }
 
-    /// 只删除确实是更新暂存目录的路径，绝不删除 App 本身或它所在的文件夹
+    /// 只删除确实是更新暂存目录的路径，绝不删除 App 本身或它所在的文件夹。
+    /// 安装位置上没有 App 时什么都不删：暂存目录里可能是仅有的副本（旧版本没能放回原处）
     static func removeStagingRoot(_ root: URL, installedApp: URL) {
         let path = root.standardizedFileURL.path
         let app = installedApp.standardizedFileURL.path
         let parent = installedApp.deletingLastPathComponent().standardizedFileURL.path
         let looksLikeStaging = path.contains("/TemporaryItems/") || path.contains("/.ZimuAI-update-") || path.contains("(A Document Being Saved By")
-        guard looksLikeStaging, path != app, path != parent, !app.hasPrefix(path + "/"), path.count > 1 else { return }
+        guard looksLikeStaging, path != app, path != parent, !app.hasPrefix(path + "/"), path.count > 1,
+              FileManager.default.fileExists(atPath: installedApp.appendingPathComponent("Contents/Info.plist").path)
+        else { return }
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 启动时删除遗留的后备暂存目录（例如等待确认安装时崩溃或被强制退出）。
+    /// 只处理记录过的、就在当前 App 旁边的目录，不扫描文件夹（列出桌面、外接磁盘等位置会触发系统的访问提示）；
+    /// 其他位置的记录留给那里的副本启动时处理
+    private static func removeLeftoverFallbackRoots(installedApp: URL) {
+        let defaults = UserDefaults.standard
+        guard let paths = defaults.stringArray(forKey: fallbackRootsKey) else { return }
+        let parent = installedApp.deletingLastPathComponent().standardizedFileURL.path
+        var remaining: [String] = []
+        for path in paths {
+            let root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            // 只记录过 .ZimuAI-update-* 目录，其他记录直接丢弃
+            guard root.lastPathComponent.hasPrefix(".ZimuAI-update-") else { continue }
+            guard root.deletingLastPathComponent().standardizedFileURL.path == parent else {
+                remaining.append(path)
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            log("removing leftover \(path)")
+            removeStagingRoot(root, installedApp: installedApp)
+            if FileManager.default.fileExists(atPath: path) { remaining.append(path) }
+        }
+        if remaining.isEmpty {
+            defaults.removeObject(forKey: fallbackRootsKey)
+        } else {
+            defaults.set(remaining, forKey: fallbackRootsKey)
+        }
     }
 
     static func log(_ message: String) {

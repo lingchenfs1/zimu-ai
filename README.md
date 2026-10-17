@@ -111,7 +111,7 @@ scripts/package_dmg.sh                    # Release 构建后打包 DMG（输出
 2. **创建 token**：GitHub › Settings › Developer settings › Personal access tokens › **Fine-grained tokens** › Generate new token：
    - Repository access 选 **Only select repositories** → `zimu-ai-releases`；
    - Permissions › Repository permissions › **Contents: Read and write**；
-   - 设置一个到期时间并记下提醒（到期后发布会跳过公开仓库）。
+   - 设置一个到期时间并记下提醒：token 到期或被撤销后，发布会在「Check release prerequisites」这一步直接失败，主仓库和公开仓库都不会发布；在 Secrets 里更新 `RELEASES_TOKEN` 后重新运行工作流即可。
    - 在主仓库 Settings › Secrets and variables › Actions › **New repository secret**，名称 `RELEASES_TOKEN`。
 3. **创建自签名代码签名证书**（固定签名身份，让更新后保留系统音频权限、让更新器能校验同一签名）：
    - 打开「钥匙串访问」› 菜单 钥匙串访问 › 证书助理 › **创建证书…**；
@@ -120,7 +120,7 @@ scripts/package_dmg.sh                    # Release 构建后打包 DMG（输出
 4. **导出证书并加到 Secrets**：
    - 在「钥匙串访问」› 我的证书 中右键这张证书 › **导出…** › 文件格式 .p12，设置一个强密码；
    - 终端运行 `base64 -i ZimuAI.p12 | pbcopy`，粘贴为 Secret `MACOS_CERTIFICATE`；密码存为 Secret `MACOS_CERTIFICATE_PASSWORD`；
-   - 终端运行 `security find-identity -p codesigning`，复制这张证书前面的 40 位十六进制 SHA-1，在 Settings › Secrets and variables › Actions › **Variables** 新建变量 `CODESIGN_IDENTITY_SHA1`（不是机密，会出现在签名里）。设置后，没有证书的发布会直接失败，防止发出签名不同、用户无法更新的版本。
+   - 终端运行 `security find-identity -p codesigning`，复制这张证书前面的 40 位十六进制 SHA-1，在 Settings › Secrets and variables › Actions › **Variables** 新建变量 `CODESIGN_IDENTITY_SHA1`（不是机密，会出现在签名里）。设置后，没有证书或没有 `RELEASES_TOKEN` 的发布会直接失败，防止发出签名不同、用户无法更新的版本，或者只发到私有仓库、已安装的用户检测不到的版本。
    - **把 .p12 和密码离线备份好**。证书丢失或更换后，已安装的用户无法通过「同一签名」校验，只能手动重装并重新授权。
    - 不要设置 `DEVELOPER_ID_APPLICATION`（它的优先级更高，是给 Developer ID 证书用的）。
 5. 用 Actions › Build › Run workflow 填写 `release_tag` 发布。第一个带在线更新的版本（v1.4.0）需要用户手动安装一次。
