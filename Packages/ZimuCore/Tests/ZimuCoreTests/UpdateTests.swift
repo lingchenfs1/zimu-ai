@@ -370,7 +370,8 @@ final class UpdateInstallSupportTests: XCTestCase {
         XCTAssertEqual(marker.outcome(runningVersion: "1.4.0", now: created.addingTimeInterval(30)), .notApplied)
         XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(2 * 86_400)), .succeeded, "隔了很久才第一次打开新版本也算更新成功")
         XCTAssertEqual(marker.outcome(runningVersion: "1.4.0", now: created.addingTimeInterval(2 * 86_400)), .stale)
-        XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(-3600)), .stale)
+        XCTAssertEqual(marker.outcome(runningVersion: "1.4.1", now: created.addingTimeInterval(-3600)), .succeeded, "时钟被往回调过，但已经运行新版本，仍算更新成功")
+        XCTAssertEqual(marker.outcome(runningVersion: "1.4.0", now: created.addingTimeInterval(-3600)), .stale)
     }
 
     func testSettingsDefaultsAndCompatibility() {

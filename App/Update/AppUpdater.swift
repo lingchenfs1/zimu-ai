@@ -61,6 +61,8 @@ final class AppUpdater {
     @ObservationIgnored private var workTask: Task<Void, Never>?
     @ObservationIgnored private var downloader: UpdateDownloader?
     @ObservationIgnored private var prepared: UpdateInstaller.Prepared?
+    /// 旧版本没能放回原处时它所在的位置（安装位置上没有 App）
+    @ObservationIgnored private var orphanedBackup: String?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
 
     private static let lastCheckKey = "zimu.update.lastSuccessfulCheck"
@@ -87,6 +89,12 @@ final class AppUpdater {
 
     var releasesPage: URL? { configuration.releasesPage }
 
+    /// 旧版本没能放回原处、安装位置上仍然没有 App 时，旧版本所在的位置
+    private var orphanedBackupIfInstallMissing: String? {
+        guard let orphanedBackup, !FileManager.default.fileExists(atPath: installer.installedApp.path) else { return nil }
+        return orphanedBackup
+    }
+
     // MARK: 启动与定时检查
 
     func start() {
@@ -112,6 +120,8 @@ final class AppUpdater {
     }
 
     private func checkIfDue() {
+        // 旧版本没能放回原处时保持失败提示（里面有旧版本的位置），不自动检查
+        if orphanedBackupIfInstallMissing != nil { return }
         let defaults = UserDefaults.standard
         let due = UpdatePolicy.isAutoCheckDue(
             now: Date(),
@@ -181,7 +191,13 @@ final class AppUpdater {
         return
         #else
         if let problem = installer.locationProblem() {
-            phase = .failed(info, message: problem.message)
+            if let backup = orphanedBackupIfInstallMissing {
+                // 重试只会因为安装位置上没有 App 而失败：继续指向旧版本，不要换成「没有权限」
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: backup)])
+                phase = .failed(info, message: BundleSwapError.rollbackFailed(previousAt: backup).localizedDescription)
+            } else {
+                phase = .failed(info, message: problem.message)
+            }
             return
         }
         phase = .downloading(info, progress: 0)
@@ -244,10 +260,10 @@ final class AppUpdater {
         }
     }
 
-    /// 退出软件时调用：删除还没安装的新版本。正在安装时不动：替换后暂存目录里是旧版本，由新版本启动时按标记清理
+    /// 退出软件时调用：删除还没替换进去的新版本（包括「正在安装」但还在停止字幕 / 重新校验时）。
+    /// 替换成功后 install 会清空 prepared：那时暂存目录里是旧版本，由新版本启动时按标记清理
     func discardPreparedUpdate() {
         guard let prepared else { return }
-        if case .installing = phase { return }
         UpdateInstaller.removeStagingRoot(prepared.stagingRoot, installedApp: installer.installedApp)
         self.prepared = nil
     }
@@ -292,9 +308,16 @@ final class AppUpdater {
             relaunchScheduled = try await installer.install(prepared, launchAtLoginEnabled: LaunchAtLogin.isEnabled)
         } catch {
             self.prepared = nil
+            if case .rollbackFailed(let previousAt) = error as? BundleSwapError {
+                orphanedBackup = previousAt
+                // 安装位置上已经没有 App：在访达中显示旧版本，方便用户拖回原处
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: previousAt)])
+            }
             phase = .failed(info, message: error.localizedDescription)
             return
         }
+        // 已替换：暂存目录里现在是旧版本，交给新版本启动时按标记清理，退出时不能删
+        self.prepared = nil
         if !relaunchScheduled {
             let alert = NSAlert()
             alert.messageText = "已安装字幕AI \(info.versionString)"
