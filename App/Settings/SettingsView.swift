@@ -1,19 +1,35 @@
 import SwiftUI
 import ZimuCore
 
+/// 设置窗口的标签页
+enum SettingsTab: Hashable {
+    case general, transcription, translation, appearance, shortcuts, update
+}
+
 struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+
     var body: some View {
-        TabView {
+        @Bindable var model = model
+        TabView(selection: $model.settingsTab) {
             GeneralSettingsView()
                 .tabItem { Label("通用", systemImage: "gearshape") }
+                .tag(SettingsTab.general)
             TranscriptionSettingsView()
                 .tabItem { Label("识别", systemImage: "waveform") }
+                .tag(SettingsTab.transcription)
             TranslationSettingsView()
                 .tabItem { Label("翻译", systemImage: "character.bubble") }
+                .tag(SettingsTab.translation)
             AppearanceSettingsView()
                 .tabItem { Label("外观", systemImage: "textformat.size") }
+                .tag(SettingsTab.appearance)
             ShortcutsSettingsView()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
+                .tag(SettingsTab.shortcuts)
+            UpdateSettingsView()
+                .tabItem { Label("更新与关于", systemImage: "arrow.down.circle") }
+                .tag(SettingsTab.update)
         }
         .frame(minWidth: 580, minHeight: 460)
     }

@@ -517,7 +517,7 @@ struct AdditionalTargetsPicker: View {
     }
 }
 
-/// 快捷键与关于
+/// 快捷键
 struct ShortcutsSettingsView: View {
     @Environment(AppModel.self) private var model
 
@@ -538,11 +538,6 @@ struct ShortcutsSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-            }
-
-            Section("关于") {
-                LabeledContent("版本", value: AppInfo.versionString)
-                Link("项目主页", destination: URL(string: "https://github.com/lingchenfs1/zimu-ai")!)
             }
         }
         .formStyle(.grouped)

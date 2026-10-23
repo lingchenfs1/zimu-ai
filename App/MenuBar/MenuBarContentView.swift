@@ -94,6 +94,11 @@ struct MenuBarContentView: View {
                 Slider(value: $store.settings.translationFontSize, in: 12...72, step: 1)
             }
 
+            if UpdateBanner.isVisible(for: model.updater) {
+                Divider()
+                UpdateBanner()
+            }
+
             Divider()
 
             HStack {

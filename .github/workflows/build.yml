@@ -13,8 +13,9 @@ on:
         default: ""
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # 手动发布（workflow_dispatch）单独排队，不会被推送触发的构建取消
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: write
@@ -23,15 +24,19 @@ jobs:
   build:
     runs-on: macos-26
     env:
-      # 可选：配置这些 Secrets 后使用 Developer ID 签名并公证
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
-      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
-      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
-      NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+      # 机密（证书、公证密码）不放在 job 级，只交给用到它的步骤。
+      # 步骤的 if: 里不能直接用 secrets，这里只放「是否配置了」（值是字符串 true / false）
+      HAS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      # 软件内更新（决策 D21 / D22 / D24）：自签名证书的 SHA-1（仓库变量）；软件读取本仓库的 Release，仓库必须公开
+      CODESIGN_IDENTITY_SHA1: ${{ vars.CODESIGN_IDENTITY_SHA1 }}
+      REPO_PRIVATE: ${{ github.event.repository.private }}
+      IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v')) }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # 之后的步骤不需要带凭据操作 git，不把 GITHUB_TOKEN 留在 .git/config 里
+          persist-credentials: false
 
       - name: Show toolchain
         run: |
@@ -63,36 +68,93 @@ jobs:
 
       - name: Upload build log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: xcodebuild-log
           path: build/xcodebuild.log
 
       - name: Import signing certificate
-        if: env.MACOS_CERTIFICATE != ''
+        if: env.HAS_CERT == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
-          KEYCHAIN_PASSWORD="$(uuidgen)"
+          # 证书可以是 Developer ID，也可以是自签名的「代码签名」证书（决策 D22）。
+          # 自签名证书不受信任也能签名：按 SHA-1 指定身份，并把临时钥匙串加入搜索列表。
+          KC="$RUNNER_TEMP/zimu-signing.keychain-db"
+          KCPW="$(uuidgen)"
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-          rm "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERTIFICATE_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # 不加 -v：自签名证书会显示 CSSMERR_TP_NOT_TRUSTED，这是正常的
+          security find-identity -p codesigning "$KC"
+          SHA1="$(security find-identity -p codesigning "$KC" | grep -Eo '[0-9A-F]{40}' | head -1)"
+          if [ -z "$SHA1" ]; then echo "::error::证书里没有代码签名身份"; exit 1; fi
+          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ "$SHA1" != "$(echo "$CODESIGN_IDENTITY_SHA1" | tr 'a-f' 'A-F')" ]; then
+            echo "::error::导入的证书（$SHA1）与仓库变量 CODESIGN_IDENTITY_SHA1 不一致"; exit 1
+          fi
+          {
+            echo "CODESIGN_KEYCHAIN=$KC"
+            echo "CODESIGN_IDENTITY=$SHA1"
+          } >> "$GITHUB_ENV"
+
+      - name: Check release prerequisites
+        if: env.IS_RELEASE == 'true'
+        run: |
+          APP="build/DerivedData/Build/Products/Release/ZimuAI.app"
+          VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
+          if [ "$RELEASE_TAG" != "v$VERSION" ]; then
+            echo "::error::发布标签 $RELEASE_TAG 与版本号 v$VERSION 不一致"; exit 1
+          fi
+          # 已经启用固定签名后，不能再发布 ad-hoc 版本，否则已安装的用户无法通过同一签名校验
+          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ "$HAS_CERT" != "true" ]; then
+            echo "::error::设置了 CODESIGN_IDENTITY_SHA1，但没有配置证书（MACOS_CERTIFICATE）"; exit 1
+          fi
+          if [ "$HAS_CERT" != "true" ]; then
+            echo "::warning::没有配置签名证书，本次发布使用 ad-hoc 签名（更新后系统音频权限需要重新允许）"
+          fi
+          # 软件读取本仓库的 Release（D24）：仓库是私有时，用户的软件读不到，已安装的用户收不到这个版本
+          if [ "$REPO_PRIVATE" = "true" ]; then
+            if [ -n "$CODESIGN_IDENTITY_SHA1" ]; then
+              echo "::error::仓库是私有的，用户的软件读不到 Release：请在 Settings › General › Change visibility 改为公开后重新运行"; exit 1
+            fi
+            echo "::warning::仓库是私有的，用户的软件读不到这次的 Release（软件内更新检测不到这个版本）"
+          fi
 
       - name: Package DMG
+        env:
+          # 可选：配置这些 Secrets 后使用 Developer ID 签名并公证（见 scripts/package_dmg.sh）
+          DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
         run: scripts/package_dmg.sh
 
+      # 签名用完立即删除临时钥匙串（失败、取消时也执行），之后的上传、发布步骤都用不到证书
+      - name: Delete signing keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/cert.p12"
+          KC="$RUNNER_TEMP/zimu-signing.keychain-db"
+          # delete-keychain 会同时把它移出钥匙串搜索列表（恢复导入前的列表）
+          if [ -f "$KC" ]; then security delete-keychain "$KC"; fi
+          security list-keychains -d user
+
       - name: Upload DMG
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ZimuAI-dmg
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
 
       - name: Prepare release notes
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v'))
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        if: env.IS_RELEASE == 'true'
         run: |
           NOTES="docs/releases/${RELEASE_TAG}.md"
           if [ -f "$NOTES" ]; then
@@ -101,12 +163,19 @@ jobs:
             echo "安装与使用说明见 README。" > release-notes.md
           fi
 
+      # 软件内更新读取本仓库的 Release（决策 D24）：dmg 供手动安装，zip 供软件内更新；
+      # 说明只用 docs/releases/vX.md（软件里会显示），不附自动生成的 PR 列表
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v'))
-        uses: softprops/action-gh-release@v2
+        if: env.IS_RELEASE == 'true'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          files: dist/*.dmg
+          name: 字幕AI ${{ env.RELEASE_TAG }}
+          files: |
+            dist/*.dmg
+            dist/*.zip
           body_path: release-notes.md
-          generate_release_notes: true
+          generate_release_notes: false
+          make_latest: "true"
+          fail_on_unmatched_files: true

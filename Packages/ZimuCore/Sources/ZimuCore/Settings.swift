@@ -242,6 +242,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     // MARK: 快捷键
     public var hotkeysEnabled: Bool = true
 
+    // MARK: 在线更新（决策 D21）
+    /// 启动时和每天自动检查新版本
+    public var autoCheckUpdates: Bool = true
+    /// 用户选择跳过的版本（只在手动检查时再显示）
+    public var skippedUpdateVersion: String = ""
+
     public init() {}
 
     /// 主目标语言之外最多再同时翻译成几种语言

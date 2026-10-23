@@ -6,10 +6,21 @@ import FoundationNetworking
 public struct HTTPResponseInfo: Sendable, Equatable {
     public var statusCode: Int
     public var contentType: String?
+    /// 响应头（键为小写），例如限流用的 x-ratelimit-remaining
+    public var headers: [String: String]
 
-    public init(statusCode: Int, contentType: String?) {
+    public init(statusCode: Int, contentType: String?, headers: [String: String] = [:]) {
         self.statusCode = statusCode
         self.contentType = contentType
+        var lowered: [String: String] = [:]
+        for (key, value) in headers {
+            lowered[key.lowercased()] = value
+        }
+        self.headers = lowered
+    }
+
+    public func header(_ name: String) -> String? {
+        headers[name.lowercased()]
     }
 
     public var isSuccess: Bool { (200..<300).contains(statusCode) }
@@ -52,9 +63,16 @@ public struct URLSessionHTTPClient: HTTPClient {
 
     static func info(from response: URLResponse) -> HTTPResponseInfo {
         let http = response as? HTTPURLResponse
+        var headers: [String: String] = [:]
+        for (key, value) in http?.allHeaderFields ?? [:] {
+            if let key = key as? String {
+                headers[key] = "\(value)"
+            }
+        }
         return HTTPResponseInfo(
             statusCode: http?.statusCode ?? 0,
-            contentType: http?.value(forHTTPHeaderField: "Content-Type")
+            contentType: http?.value(forHTTPHeaderField: "Content-Type"),
+            headers: headers
         )
     }
 }
