@@ -311,6 +311,10 @@ final class UpdatePolicyTests: XCTestCase {
         for string in denied {
             XCTAssertFalse(UpdatePolicy.isAllowedDownloadURL(URL(string: string)!, repository: repo), string)
         }
+        // 名字前缀相同的其他仓库不能放行
+        for string in ["https://github.com/owner/zimu-ai-releases/releases/download/v1/x.zip", "https://github.com/owner/zimu-ai2/releases/download/v1/x.zip"] {
+            XCTAssertFalse(UpdatePolicy.isAllowedDownloadURL(URL(string: string)!, repository: "owner/zimu-ai"), string)
+        }
     }
 }
 

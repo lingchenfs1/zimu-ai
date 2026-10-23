@@ -45,7 +45,7 @@ public struct GitHubReleaseAsset: Decodable, Sendable, Equatable {
 
 /// 在线更新的配置（决策 D21）
 public struct UpdateConfiguration: Sendable, Equatable {
-    /// 公开发布仓库，形如 "owner/repo"
+    /// 发布新版本的 GitHub 仓库（必须公开，决策 D24），形如 "owner/repo"
     public var repository: String
     /// 安装包文件名前缀：资产名为 "<前缀><版本><后缀>"
     public var assetPrefix: String
@@ -173,7 +173,7 @@ public enum UpdateCheckError: Error, LocalizedError, Equatable {
     }
 }
 
-/// 从公开发布仓库检查新版本（决策 D21）
+/// 从 GitHub 公开仓库的 Release 检查新版本（决策 D21 / D24）
 public struct UpdateChecker: Sendable {
     public var configuration: UpdateConfiguration
     public var currentVersion: SemanticVersion

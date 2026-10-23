@@ -73,7 +73,7 @@ final class AppUpdater {
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         self.currentVersionString = version
         self.currentVersion = SemanticVersion(version) ?? SemanticVersion(major: 0)
-        var repository = bundle.object(forInfoDictionaryKey: "ZimuUpdateRepository") as? String ?? "lingchenfs1/zimu-ai-releases"
+        var repository = bundle.object(forInfoDictionaryKey: "ZimuUpdateRepository") as? String ?? "lingchenfs1/zimu-ai"
         #if DEBUG
         // 调试时可以指向测试用的发布仓库
         if let override = UserDefaults.standard.string(forKey: "ZimuUpdateRepositoryOverride"), !override.isEmpty {

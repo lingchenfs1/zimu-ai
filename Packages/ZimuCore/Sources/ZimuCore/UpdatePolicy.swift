@@ -34,7 +34,7 @@ public enum UpdatePolicy {
     }
 
     /// 下载地址（包括重定向后的地址）是否可信：只允许 https、默认端口、没有用户信息，
-    /// 并且是这个发布仓库的下载路径或 GitHub 的发布文件存储主机
+    /// 并且是发布新版本的仓库的下载路径或 GitHub 的发布文件存储主机
     public static func isAllowedDownloadURL(_ url: URL, repository: String) -> Bool {
         guard url.scheme?.lowercased() == "https",
               url.user == nil, url.password == nil,

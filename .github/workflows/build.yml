@@ -24,13 +24,12 @@ jobs:
   build:
     runs-on: macos-26
     env:
-      # 机密（证书、token、公证密码）不放在 job 级，只交给用到它的步骤。
+      # 机密（证书、公证密码）不放在 job 级，只交给用到它的步骤。
       # 步骤的 if: 里不能直接用 secrets，这里只放「是否配置了」（值是字符串 true / false）
       HAS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
-      HAS_RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN != '' }}
-      # 软件内更新（决策 D21 / D22）：公开发布仓库、自签名证书的 SHA-1（仓库变量）
-      RELEASES_REPOSITORY: lingchenfs1/zimu-ai-releases
+      # 软件内更新（决策 D21 / D22 / D24）：自签名证书的 SHA-1（仓库变量）；软件读取本仓库的 Release，仓库必须公开
       CODESIGN_IDENTITY_SHA1: ${{ vars.CODESIGN_IDENTITY_SHA1 }}
+      REPO_PRIVATE: ${{ github.event.repository.private }}
       IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v')) }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     steps:
@@ -106,9 +105,6 @@ jobs:
 
       - name: Check release prerequisites
         if: env.IS_RELEASE == 'true'
-        env:
-          # 只在这一步用来验证 token，不交给其他步骤
-          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           APP="build/DerivedData/Build/Products/Release/ZimuAI.app"
           VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
@@ -122,20 +118,12 @@ jobs:
           if [ "$HAS_CERT" != "true" ]; then
             echo "::warning::没有配置签名证书，本次发布使用 ad-hoc 签名（更新后系统音频权限需要重新允许）"
           fi
-          # 已经启用软件内更新（设置了证书指纹）后，不发布到公开仓库，已安装的用户就收不到这个版本
-          if [ -n "$CODESIGN_IDENTITY_SHA1" ] && [ "$HAS_RELEASES_TOKEN" != "true" ]; then
-            echo "::error::设置了 CODESIGN_IDENTITY_SHA1，但没有配置 RELEASES_TOKEN，不能发布到公开仓库 $RELEASES_REPOSITORY"; exit 1
-          fi
-          if [ "$HAS_RELEASES_TOKEN" != "true" ]; then
-            echo "::warning::没有配置 RELEASES_TOKEN，不会发布到公开仓库 $RELEASES_REPOSITORY，软件内更新检测不到这个版本"
-          fi
-          # 在任何发布步骤之前确认 token 有效（未过期、未撤销），避免主仓库已经发布、公开仓库才失败。
-          # 公开仓库任何有效 token 都能读取，这里确认不了写权限（按 README 授予 Contents: Read and write）
-          if [ "$HAS_RELEASES_TOKEN" = "true" ] && ! curl -fsS --retry 3 --max-time 30 -o /dev/null \
-            -H "Authorization: Bearer $RELEASES_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$RELEASES_REPOSITORY"; then
-            echo "::error::无法用 RELEASES_TOKEN 访问发布仓库 $RELEASES_REPOSITORY（上面是 401：token 无效或已过期，请在 Secrets 里更新后重新运行；404：仓库不存在；其他错误多半是网络问题，直接重新运行即可）"; exit 1
+          # 软件读取本仓库的 Release（D24）：仓库是私有时，用户的软件读不到，已安装的用户收不到这个版本
+          if [ "$REPO_PRIVATE" = "true" ]; then
+            if [ -n "$CODESIGN_IDENTITY_SHA1" ]; then
+              echo "::error::仓库是私有的，用户的软件读不到 Release：请在 Settings › General › Change visibility 改为公开后重新运行"; exit 1
+            fi
+            echo "::warning::仓库是私有的，用户的软件读不到这次的 Release（软件内更新检测不到这个版本）"
           fi
 
       - name: Package DMG
@@ -175,28 +163,14 @@ jobs:
             echo "安装与使用说明见 README。" > release-notes.md
           fi
 
+      # 软件内更新读取本仓库的 Release（决策 D24）：dmg 供手动安装，zip 供软件内更新；
+      # 说明只用 docs/releases/vX.md（软件里会显示），不附自动生成的 PR 列表
       - name: Publish release
         if: env.IS_RELEASE == 'true'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          files: |
-            dist/*.dmg
-            dist/*.zip
-          body_path: release-notes.md
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-
-      # 软件内更新读取的公开发布仓库（主仓库是私有的，决策 D21）。
-      # 不传 target_commitish：这个提交不在发布仓库里，标签建在发布仓库的默认分支上
-      - name: Publish to public releases repository
-        if: env.IS_RELEASE == 'true' && env.HAS_RELEASES_TOKEN == 'true'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          repository: ${{ env.RELEASES_REPOSITORY }}
-          token: ${{ secrets.RELEASES_TOKEN }}
-          tag_name: ${{ env.RELEASE_TAG }}
           name: 字幕AI ${{ env.RELEASE_TAG }}
           files: |
             dist/*.dmg
